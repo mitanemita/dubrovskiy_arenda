@@ -16,6 +16,8 @@ async def lease(session):
     session.add(landlord)
     await session.flush()
     await settings_service.ensure_defaults(session, landlord.id)
+    # Фиксируем коэффициент = 1.0, чтобы суммы в тестах не зависели от значения по умолчанию
+    await settings_service.set_setting(session, landlord.id, "electricity_coeff", "1.0")
 
     premises = Premises(landlord_id=landlord.id, label="Склад №3", address="г. Узловая, ул. Складская, 3")
     session.add(premises)
