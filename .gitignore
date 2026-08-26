@@ -1,0 +1,26 @@
+# Секреты и окружение
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Логи и сгенерированные файлы
+бот_квитанции/data/logs/*.log
+бот_квитанции/data/files/*
+!бот_квитанции/data/files/.gitkeep
+
+# Фото подписей арендодателей (персональные данные)
+бот_квитанции/data/photos/*.png
+
+# ОС
+.DS_Store
+Thumbs.db
