@@ -5,9 +5,21 @@
 """
 from __future__ import annotations
 
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.db.enums import NotifChannel, NotifStatus
 from app.db.models import Notification
-from sqlalchemy.ext.asyncio import AsyncSession
+
+
+async def exists(session: AsyncSession, *, type: str, related_charge_id: int) -> bool:
+    """Есть ли уже уведомление данного типа, привязанное к начислению (антидубль)."""
+    result = await session.execute(
+        select(func.count())
+        .select_from(Notification)
+        .where(Notification.type == type, Notification.related_charge_id == related_charge_id)
+    )
+    return result.scalar_one() > 0
 
 
 async def enqueue(
