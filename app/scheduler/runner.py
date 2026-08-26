@@ -16,8 +16,9 @@ async def _run_generate_period_charges() -> None:
     async with async_session_factory() as session:
         try:
             stats = await jobs.generate_period_charges(session, date.today())
+            exp_stats = await jobs.generate_fixed_expenses(session, date.today())
             await session.commit()
-            logger.info("Начисления за период сформированы: %s", stats)
+            logger.info("Начисления за период сформированы: %s; %s", stats, exp_stats)
         except Exception:
             await session.rollback()
             logger.exception("Ошибка задачи generate_period_charges")

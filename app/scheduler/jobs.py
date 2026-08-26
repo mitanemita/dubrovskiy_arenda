@@ -11,10 +11,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.enums import ChargeStatus, ChargeType, LeaseStatus, NotifChannel
-from app.db.models import Charge, Lease, Tenant
+from app.db.models import Charge, Landlord, Lease, Tenant
 from app.domain import billing
 from app.domain.allocation import charge_status
-from app.services import billing_service, notification_service, settings_service
+from app.services import billing_service, expense_service, notification_service, settings_service
+
+
+async def generate_fixed_expenses(session: AsyncSession, today: date) -> dict:
+    """Авто-фиксированные расходы (серверная, зарплаты) для всех арендодателей."""
+    landlord_ids = (await session.execute(select(Landlord.id))).scalars().all()
+    created = 0
+    for landlord_id in landlord_ids:
+        created += await expense_service.generate_fixed_expenses(session, landlord_id, today)
+    return {"fixed_expenses": created}
 
 
 async def _active_leases(session: AsyncSession) -> list[tuple[Lease, int]]:
