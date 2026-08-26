@@ -27,8 +27,9 @@ class TaxMode(str, enum.Enum):
 class UserRole(str, enum.Enum):
     """Роль оператора бота."""
 
-    owner = "owner"  # владелец (полный доступ)
-    admin = "admin"  # доверенный оператор
+    owner = "owner"          # владелец (полный доступ)
+    admin = "admin"          # доверенный оператор
+    accountant = "accountant"  # бухгалтер (налоги, электричество и т.п.)
 
 
 class LeaseStatus(str, enum.Enum):

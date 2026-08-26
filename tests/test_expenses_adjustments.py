@@ -104,6 +104,21 @@ async def test_correct_invalid_entity(session, env):
         )
 
 
+async def test_taxes_expense_manual(session, env):
+    exp = await expense_service.add_expense(
+        session, landlord_id=env["landlord"].id, category=ExpenseCategory.taxes,
+        amount=Decimal("8000.00"), period=date(2026, 4, 10), description="АУСН за апрель",
+    )
+    await session.flush()
+    assert exp.category == ExpenseCategory.taxes
+    assert exp.mode == ExpenseMode.manual
+
+
+def test_accountant_role_exists():
+    from app.db.enums import UserRole
+    assert UserRole.accountant.value == "accountant"
+
+
 async def test_payments_by_premises(session, env):
     p = Payment(lease_id=env["lease"].id, amount=Decimal("50000.00"), status=PaymentStatus.confirmed)
     session.add(p)

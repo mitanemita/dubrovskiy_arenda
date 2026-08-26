@@ -80,7 +80,7 @@ def upgrade() -> None:
     sa.Column('landlord_id', sa.Integer(), nullable=False),
     sa.Column('tg_id', sa.BigInteger(), nullable=False),
     sa.Column('name', sa.Text(), nullable=True),
-    sa.Column('role', sa.Enum('owner', 'admin', name='user_role'), nullable=False),
+    sa.Column('role', sa.Enum('owner', 'admin', 'accountant', name='user_role'), nullable=False),
     sa.Column('is_active', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=False),

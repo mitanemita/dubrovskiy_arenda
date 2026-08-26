@@ -23,12 +23,13 @@ from aiogram.types import (
 from sqlalchemy import select
 
 from app.db.base import async_session_factory
-from app.db.enums import ExpenseCategory
-from app.db.models import User
+from app.db.enums import DataSource, ExpenseCategory
+from app.db.models import Meter, Premises, User
 from app.services import (
     adjustment_service,
     expense_service,
     matching_service,
+    reading_service,
     report_service,
     settings_service,
 )
@@ -49,6 +50,7 @@ _EXPENSE_CHOICES = {
     "travel": "Командировочные",
     "repair": "Текущий ремонт",
     "docs": "Документация",
+    "taxes": "Налоги",
     "other": "Прочее",
 }
 
@@ -66,11 +68,16 @@ class AdjustFSM(StatesGroup):
     reason = State()
 
 
+class ReadingFSM(StatesGroup):
+    value = State()
+
+
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="💸 Расход")],
-            [KeyboardButton(text="✏️ Корректировка"), KeyboardButton(text="📊 Отчёты")],
+            [KeyboardButton(text="🔢 Показания"), KeyboardButton(text="✏️ Корректировка")],
+            [KeyboardButton(text="📊 Отчёты")],
         ],
         resize_keyboard=True,
     )
@@ -230,6 +237,88 @@ async def adjust_save(message: Message, state: FSMContext) -> None:
             return
     await state.clear()
     await message.answer("✅ Корректировка сохранена (записана в аудит).", reply_markup=main_menu())
+
+
+# --- Показания счётчиков (ручной ввод / электричество) --------------------
+@router.message(F.text == "🔢 Показания")
+async def readings_menu(message: Message) -> None:
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, message.from_user.id)
+        if lid is None:
+            await message.answer("Нет арендодателя.")
+            return
+        rows = (
+            await session.execute(
+                select(Meter.id, Meter.serial_no, Meter.label, Premises.label)
+                .join(Premises, Premises.id == Meter.premises_id)
+                .where(Premises.landlord_id == lid)
+            )
+        ).all()
+    if not rows:
+        await message.answer("Счётчиков пока нет.")
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"{prem} · {serial or label or ('счётчик ' + str(mid))}",
+                callback_data=f"mr:{mid}",
+            )]
+            for mid, serial, label, prem in rows
+        ]
+    )
+    await message.answer("Выберите счётчик для ввода показаний:", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("mr:"))
+async def reading_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    meter_id = int(callback.data.split(":", 1)[1])
+    await state.update_data(meter_id=meter_id)
+    await state.set_state(ReadingFSM.value)
+    await callback.message.answer(
+        "Введите период и текущие показания в формате: ММ.ГГГГ значение\n"
+        "Пример: 04.2026 15350"
+    )
+    await callback.answer()
+
+
+@router.message(ReadingFSM.value)
+async def reading_save(message: Message, state: FSMContext) -> None:
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.answer("❌ Формат: ММ.ГГГГ значение. Повторите:")
+        return
+    try:
+        month, year = parts[0].split(".")
+        period = date(int(year), int(month), 1)
+    except (ValueError, IndexError):
+        await message.answer("❌ Неверный период (ММ.ГГГГ). Повторите:")
+        return
+    curr = _parse_amount(parts[1])
+    if curr is None or curr < 0:
+        await message.answer("❌ Неверное значение показаний. Повторите:")
+        return
+
+    data = await state.get_data()
+    async with async_session_factory() as session:
+        meter = await session.get(Meter, data["meter_id"])
+        if meter is None:
+            await state.clear()
+            await message.answer("❌ Счётчик не найден.", reply_markup=main_menu())
+            return
+        try:
+            reading = await reading_service.upsert_reading(
+                session, meter, period=period, curr_value=curr, source=DataSource.manual
+            )
+            await session.commit()
+        except ValueError as exc:
+            await session.rollback()
+            await state.clear()
+            await message.answer(f"❌ {exc}", reply_markup=main_menu())
+            return
+    await state.clear()
+    await message.answer(
+        f"✅ Показания сохранены. Расход: {reading.consumption} кВт·ч.", reply_markup=main_menu()
+    )
 
 
 # --- Отчёты ----------------------------------------------------------------
