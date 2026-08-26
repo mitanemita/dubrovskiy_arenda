@@ -20,7 +20,6 @@ APScheduler==3.10.4
 # --- Генерация документов (PDF из HTML) ---
 Jinja2==3.1.4
 weasyprint==62.3
-num2words==0.5.13
 
 # --- Почта ---
 aiosmtplib==3.0.2
