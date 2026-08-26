@@ -12,6 +12,8 @@ from app.bot.handlers import router
 from app.bot.handlers_admin import router as admin_router
 from app.config import get_settings
 from app.db.base import async_session_factory
+from app.email.sender import send_email
+from app.services import email_service
 from app.utils.logger import logger
 
 # Интервал проверки очереди TG-уведомлений, сек
@@ -33,12 +35,15 @@ async def _dispatch_loop(bot: Bot) -> None:
     while True:
         try:
             async with async_session_factory() as session:
-                stats = await notifier.dispatch_telegram(session, _send)
+                tg_stats = await notifier.dispatch_telegram(session, _send)
+                email_stats = await email_service.dispatch_email(session, send_email)
                 await session.commit()
-                if stats["sent"] or stats["failed"]:
-                    logger.info("TG-уведомления: %s", stats)
+                if any(tg_stats.values()):
+                    logger.info("TG-уведомления: %s", tg_stats)
+                if any(email_stats.values()):
+                    logger.info("Email-уведомления: %s", email_stats)
         except Exception:
-            logger.exception("Ошибка цикла доставки TG-уведомлений")
+            logger.exception("Ошибка цикла доставки уведомлений")
         await asyncio.sleep(DISPATCH_INTERVAL)
 
 

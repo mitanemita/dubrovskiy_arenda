@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4 landscape; margin: 12mm; }
+  body { font-family: Arial, "DejaVu Sans", sans-serif; font-size: 9pt; color: #000; }
+  .status { border: 1.5px solid #000; padding: 3px 8px; font-weight: bold; float: right; }
+  .title { text-align: center; font-weight: bold; font-size: 12pt; margin: 2px 0; }
+  .sub { text-align: center; font-size: 7.5pt; color: #333; margin: 0 0 10px; }
+  .line { border-bottom: 1px solid #999; padding: 2px 0; font-size: 8.5pt; }
+  .ref { color: #777; font-size: 7pt; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 8pt; }
+  th, td { border: 1px solid #000; padding: 3px 4px; vertical-align: top; }
+  th { background: #eee; text-align: center; font-size: 7.5pt; }
+  td.num { text-align: right; }
+  td.c { text-align: center; }
+  .totals { text-align: right; font-weight: bold; margin: 4px 0; }
+  .words { font-style: italic; font-size: 8.5pt; margin-bottom: 12px; }
+  .transfer { border-top: 2px solid #000; margin-top: 12px; padding-top: 8px; }
+  .cols { display: flex; gap: 30px; }
+  .col { flex: 1; font-size: 8pt; }
+  .col div { padding: 3px 0; border-bottom: 1px solid #bbb; }
+  .sig { max-height: 60px; }
+  .mp { color: #555; font-weight: bold; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <div class="status">Статус: {{ status }}</div>
+  <div style="clear:both"></div>
+  <div class="title">Универсальный передаточный документ</div>
+  <div class="sub">Статус: 1 — счёт-фактура и передаточный документ (акт); 2 — передаточный документ (акт).
+    Форма по приказу ФНС от 19.12.2023 № ЕД-7-26/970@ (ред. № ЕД-7-26/1032@), формат {{ version }}.</div>
+
+  <div class="line">Счёт-фактура № {{ number }} от {{ doc_date_str }} <span class="ref">(1)</span>
+    {% if status == 2 %}<span class="ref">— для статуса 2 строки (1)–(8) счёта-фактуры не заполняются</span>{% endif %}</div>
+  <div class="line">Продавец: {{ seller.name }} <span class="ref">(2)</span></div>
+  <div class="line">Адрес: {{ seller.address or '—' }} <span class="ref">(2а)</span></div>
+  <div class="line">ИНН/КПП продавца: {{ seller.inn }} / {{ seller.kpp or '—' }} <span class="ref">(2б)</span></div>
+  <div class="line">Покупатель: {{ buyer.name }} <span class="ref">(6)</span></div>
+  <div class="line">Адрес: {{ buyer.address or '—' }} <span class="ref">(6а)</span></div>
+  <div class="line">ИНН/КПП покупателя: {{ buyer.inn }} / {{ buyer.kpp or '—' }} <span class="ref">(6б)</span></div>
+  <div class="line">Валюта: Российский рубль, 643 <span class="ref">(7)</span></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>№</th><th>Наименование работ, услуг</th><th>Ед.</th><th>Кол-во</th>
+        <th>Цена</th><th>Стоимость без налога</th><th>Налог. ставка</th><th>Стоимость с налогом</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in lines %}
+      <tr>
+        <td class="c">{{ row.n }}</td>
+        <td>{{ row.name }}</td>
+        <td class="c">{{ row.unit }}</td>
+        <td class="num">{{ row.qty }}</td>
+        <td class="num">{{ row.price | money }}</td>
+        <td class="num">{{ row.amount | money }}</td>
+        <td class="c">{{ row.tax }}</td>
+        <td class="num">{{ row.amount | money }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="totals">Всего к оплате (9): {{ total | money }} руб.</div>
+  <div class="words">Сумма прописью: {{ total_words }}</div>
+
+  <div class="transfer">
+    <div class="line">[9] Основание: Договор аренды № {{ contract_no }} от {{ contract_date_str }}</div>
+    <div class="cols">
+      <div class="col">
+        <div><b>Услуги сдал (продавец)</b></div>
+        <div>{{ seller.name }}
+          {% if signature_data_uri %}<br><img class="sig" src="{{ signature_data_uri }}">{% endif %}</div>
+        <div>[11] Дата передачи: {{ doc_date_str }}</div>
+        <div>[14] Составитель: {{ seller.name }}</div>
+        <div class="mp">М.П.</div>
+      </div>
+      <div class="col">
+        <div><b>Услуги принял (покупатель)</b></div>
+        <div>[15] Подпись, ФИО: ______________</div>
+        <div>[16] Дата получения: __________</div>
+        <div>[19] Составитель: {{ buyer.name }}</div>
+        <div class="mp">М.П.</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
