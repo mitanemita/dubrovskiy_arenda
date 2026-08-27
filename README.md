@@ -53,10 +53,23 @@ tests/                82 теста (финансовая логика, рекв
 
 ## Развёртывание на Ubuntu (Docker)
 
-1. Установить Docker и Docker Compose:
+1. Установить Docker (официальные пакеты Docker CE) и Compose-плагин:
    ```bash
-   sudo apt update && sudo apt install -y docker.io docker-compose-plugin
+   # официальный репозиторий Docker
+   sudo apt update
+   sudo apt install -y ca-certificates curl
+   sudo install -m 0755 -d /etc/apt/keyrings
+   sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+   sudo chmod a+r /etc/apt/keyrings/docker.asc
+   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+     https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
+     sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+   sudo apt update
+   sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+   sudo systemctl enable --now docker
    ```
+   > Не ставьте пакет Ubuntu `docker.io` вместе с репозиторием Docker: его
+   > `containerd` конфликтует с `containerd.io`. Используйте только `docker-ce`.
 2. Клонировать репозиторий и подготовить окружение:
    ```bash
    git clone <repo> && cd dubrovskiy_arenda
