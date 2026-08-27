@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 18mm; }
+  body { font-family: Arial, "DejaVu Sans", sans-serif; font-size: 11pt; color: #000; }
+  .head { display: flex; justify-content: space-between; border-bottom: 2px solid #000; padding-bottom: 6px; margin-bottom: 10px; }
+  .t { font-weight: bold; font-size: 16pt; }
+  .t.overdue { color: #b00; }
+  .per { text-align: right; font-size: 10pt; }
+  .row { display: flex; padding: 2px 0; font-size: 10.5pt; }
+  .row .k { width: 45%; color: #444; }
+  .row .v { font-weight: bold; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 10.5pt; }
+  th, td { border: 1px solid #000; padding: 6px 8px; }
+  th { background: #eee; text-align: left; }
+  td.num { text-align: right; }
+  td.pen { color: #b00; }
+  .total { display: flex; justify-content: space-between; font-size: 14pt; font-weight: bold;
+           border-top: 2px solid #000; margin-top: 8px; padding-top: 8px; }
+  .total.overdue span:last-child { color: #b00; }
+  .words { font-style: italic; font-size: 10pt; margin-top: 4px; }
+  .note { font-size: 9.5pt; color: #444; margin-top: 12px; }
+  .note.overdue { color: #b00; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="t {% if overdue %}overdue{% endif %}">
+      {% if overdue %}Квитанция · ОПЛАТА ПРОСРОЧЕНА{% else %}Квитанция на оплату{% endif %}
+    </div>
+    <div class="per">за период<br><b>{{ period_str }}</b><br>
+      {% if overdue %}срок истёк {{ due_str }}{% else %}оплатить до {{ due_str }}{% endif %}</div>
+  </div>
+
+  <div class="row"><div class="k">Получатель</div><div class="v">{{ receiver.name }}</div></div>
+  <div class="row"><div class="k">ИНН получателя</div><div class="v">{{ receiver.inn }}</div></div>
+  {% if receiver.bank_name %}<div class="row"><div class="k">Банк</div><div class="v">{{ receiver.bank_name }}</div></div>{% endif %}
+  {% if receiver.bik %}<div class="row"><div class="k">БИК / Кор. счёт</div><div class="v">{{ receiver.bik }} / {{ receiver.corr_account or '—' }}</div></div>{% endif %}
+  {% if receiver.account %}<div class="row"><div class="k">Расчётный счёт</div><div class="v">{{ receiver.account }}</div></div>{% endif %}
+  <div class="row"><div class="k">Плательщик</div><div class="v">{{ payer.name }}</div></div>
+  <div class="row"><div class="k">Договор</div><div class="v">№ {{ payer.contract_no }} от {{ payer.contract_date_str }}</div></div>
+  {% if overdue %}<div class="row"><div class="k">Просрочка</div><div class="v">{{ days_overdue }} дн. · пени {{ penalty_rate }}%/день</div></div>{% endif %}
+
+  <table>
+    <thead><tr><th>Наименование</th><th>Кол-во</th><th style="text-align:right">Сумма, ₽</th></tr></thead>
+    <tbody>
+      {% for row in lines %}
+      <tr>
+        <td {% if row.penalty %}class="pen"{% endif %}>{{ row.name }}</td>
+        <td>{{ row.qty }}</td>
+        <td class="num {% if row.penalty %}pen{% endif %}">{{ row.amount | money }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="total {% if overdue %}overdue{% endif %}">
+    <span>{% if overdue %}Итого с пеней{% else %}Итого к оплате{% endif %}</span>
+    <span>{{ total | money }} ₽</span>
+  </div>
+  <div class="words">Сумма прописью: {{ total_words }}</div>
+  <div class="note {% if overdue %}overdue{% endif %}">
+    Назначение платежа: оплата по договору аренды № {{ payer.contract_no }} за {{ period_str }}. Без НДС.
+    {% if overdue %} Просим погасить задолженность с учётом пени в кратчайший срок.{% endif %}
+  </div>
+</body>
+</html>
