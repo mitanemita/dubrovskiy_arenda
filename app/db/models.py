@@ -355,6 +355,26 @@ class Notification(TimestampMixin, Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class Task(TimestampMixin, Base):
+    """Задача менеджера задач: приоритет + дата напоминания."""
+
+    __tablename__ = "tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    landlord_id: Mapped[int] = mapped_column(ForeignKey("landlords.id", ondelete="CASCADE"), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    priority: Mapped[enums.TaskPriority] = mapped_column(
+        _enum(enums.TaskPriority, "task_priority"), nullable=False, default=enums.TaskPriority.medium
+    )
+    due_date: Mapped[date | None] = mapped_column(Date)  # дата напоминания
+    status: Mapped[enums.TaskStatus] = mapped_column(
+        _enum(enums.TaskStatus, "task_status"), nullable=False, default=enums.TaskStatus.open
+    )
+    remind_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
 class Adjustment(Base):
     """Аудит ручных корректировок доходов/расходов за любой период."""
 

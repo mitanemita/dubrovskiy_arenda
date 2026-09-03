@@ -109,6 +109,19 @@ class DocSentStatus(str, enum.Enum):
     failed = "failed"
 
 
+class TaskPriority(str, enum.Enum):
+    """Приоритет задачи."""
+
+    high = "high"      # высокий
+    medium = "medium"  # средний
+    low = "low"        # низкий
+
+
+class TaskStatus(str, enum.Enum):
+    open = "open"
+    done = "done"
+
+
 class NotifChannel(str, enum.Enum):
     email = "email"
     telegram = "telegram"

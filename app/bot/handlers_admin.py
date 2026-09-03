@@ -5,7 +5,7 @@ UI-обёртки над сервисами (settings/expense/reading/adjustment
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from aiogram import F, Router
@@ -23,15 +23,18 @@ from aiogram.types import (
 from sqlalchemy import select
 
 from app.db.base import async_session_factory
-from app.db.enums import DataSource, ExpenseCategory
-from app.db.models import Meter, Premises, User
+from app.db.enums import DataSource, ExpenseCategory, LeaseStatus, TaskPriority
+from app.db.models import Lease, Meter, Premises, Tenant, User
 from app.services import (
     adjustment_service,
+    confirmation_service,
     expense_service,
     matching_service,
+    payment_service,
     reading_service,
     report_service,
     settings_service,
+    task_service,
 )
 
 router = Router()
@@ -72,11 +75,22 @@ class ReadingFSM(StatesGroup):
     value = State()
 
 
+class TaskFSM(StatesGroup):
+    title = State()
+    priority = State()
+    due = State()
+
+
+class PayFSM(StatesGroup):
+    amount = State()
+
+
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="💸 Расход")],
             [KeyboardButton(text="🔢 Показания"), KeyboardButton(text="✏️ Корректировка")],
+            [KeyboardButton(text="📝 Задачи"), KeyboardButton(text="💰 Отметить оплату")],
             [KeyboardButton(text="📊 Отчёты")],
         ],
         resize_keyboard=True,
@@ -319,6 +333,144 @@ async def reading_save(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"✅ Показания сохранены. Расход: {reading.consumption} кВт·ч.", reply_markup=main_menu()
     )
+
+
+# --- Менеджер задач --------------------------------------------------------
+@router.message(F.text == "📝 Задачи")
+async def tasks_menu(message: Message) -> None:
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, message.from_user.id)
+        tasks = await task_service.list_tasks(session, lid) if lid else []
+
+    add_btn = InlineKeyboardButton(text="➕ Новая задача", callback_data="task_add")
+    rows = [[add_btn]]
+    lines = ["<b>📝 Открытые задачи:</b>"]
+    if not tasks:
+        lines.append("— пусто")
+    for t in tasks:
+        due = f" · до {t.due_date.strftime('%d.%m.%Y')}" if t.due_date else ""
+        lines.append(f"{task_service.PRIORITY_LABEL.get(t.priority, '')} {t.title}{due}")
+        rows.append([InlineKeyboardButton(text=f"✅ Выполнено: {t.title[:20]}", callback_data=f"taskdone:{t.id}")])
+    await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data == "task_add")
+async def task_add_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(TaskFSM.title)
+    await callback.message.answer("Введите текст задачи:")
+    await callback.answer()
+
+
+@router.message(TaskFSM.title)
+async def task_title(message: Message, state: FSMContext) -> None:
+    await state.update_data(title=message.text.strip())
+    await state.set_state(TaskFSM.priority)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔴 Высокий", callback_data="tp:high"),
+        InlineKeyboardButton(text="🟡 Средний", callback_data="tp:medium"),
+        InlineKeyboardButton(text="🟢 Низкий", callback_data="tp:low"),
+    ]])
+    await message.answer("Выберите приоритет:", reply_markup=kb)
+
+
+@router.callback_query(TaskFSM.priority, F.data.startswith("tp:"))
+async def task_priority(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(priority=callback.data.split(":", 1)[1])
+    await state.set_state(TaskFSM.due)
+    await callback.message.answer("Дата напоминания в формате ДД.ММ.ГГГГ (или «-» без даты):")
+    await callback.answer()
+
+
+@router.message(TaskFSM.due)
+async def task_due(message: Message, state: FSMContext) -> None:
+    text = message.text.strip()
+    due = None
+    if text != "-":
+        try:
+            due = datetime.strptime(text, "%d.%m.%Y").date()
+        except ValueError:
+            await message.answer("❌ Формат ДД.ММ.ГГГГ или «-». Повторите:")
+            return
+    data = await state.get_data()
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, message.from_user.id)
+        user = (await session.execute(select(User).where(User.tg_id == message.from_user.id))).scalar_one_or_none()
+        await task_service.create_task(
+            session, landlord_id=lid, title=data["title"],
+            priority=TaskPriority(data["priority"]), due_date=due,
+            created_by_id=user.id if user else None,
+        )
+        await session.commit()
+    await state.clear()
+    due_str = f" (напомню {due.strftime('%d.%m.%Y')})" if due else ""
+    await message.answer(f"✅ Задача добавлена{due_str}.", reply_markup=main_menu())
+
+
+@router.callback_query(F.data.startswith("taskdone:"))
+async def task_done(callback: CallbackQuery) -> None:
+    task_id = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        await task_service.mark_done(session, task_id)
+        await session.commit()
+    await callback.answer("Задача выполнена")
+    try:
+        await callback.message.edit_text("✅ Задача отмечена выполненной.")
+    except Exception:
+        pass
+
+
+# --- Ручная отметка оплаты от арендатора -----------------------------------
+@router.message(F.text == "💰 Отметить оплату")
+async def payment_manual_menu(message: Message) -> None:
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, message.from_user.id)
+        rows = (await session.execute(
+            select(Lease.id, Lease.contract_no, Tenant.name)
+            .join(Tenant, Tenant.id == Lease.tenant_id)
+            .where(Tenant.landlord_id == lid, Lease.status == LeaseStatus.active)
+        )).all() if lid else []
+    if not rows:
+        await message.answer("Активных договоров нет.")
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{name} · №{contract}", callback_data=f"pm:{lid}")]
+        for lid, contract, name in rows
+    ])
+    await message.answer("Выберите договор для отметки оплаты:", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("pm:"))
+async def payment_manual_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(lease_id=int(callback.data.split(":", 1)[1]))
+    await state.set_state(PayFSM.amount)
+    await callback.message.answer("Введите сумму поступившей оплаты, ₽:")
+    await callback.answer()
+
+
+@router.message(PayFSM.amount)
+async def payment_manual_save(message: Message, state: FSMContext) -> None:
+    amount = _parse_amount(message.text)
+    if amount is None or amount <= 0:
+        await message.answer("❌ Введите положительную сумму. Повторите:")
+        return
+    data = await state.get_data()
+    async with async_session_factory() as session:
+        user = (await session.execute(select(User).where(User.tg_id == message.from_user.id))).scalar_one_or_none()
+        payment = await payment_service.register_payment(
+            session, data["lease_id"], amount, payment_date=date.today(), source=DataSource.manual
+        )
+        await session.flush()
+        # арендодатель отмечает вручную -> сразу подтверждаем
+        result = await confirmation_service.process_payment_decision(
+            session, payment, approve=True, user_id=user.id if user else None, today=date.today()
+        )
+        await session.commit()
+    await state.clear()
+    if result.get("fully_paid"):
+        note = "начисления закрыты полностью"
+    else:
+        note = f"частично, остаток {result.get('remaining_debt')} ₽"
+    await message.answer(f"✅ Оплата {amount} ₽ отмечена ({note}). Арендатор уведомлён.", reply_markup=main_menu())
 
 
 # --- Отчёты ----------------------------------------------------------------

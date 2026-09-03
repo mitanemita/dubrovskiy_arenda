@@ -14,7 +14,14 @@ from app.db.enums import ChargeStatus, ChargeType, LeaseStatus, NotifChannel
 from app.db.models import Charge, Landlord, Lease, Tenant
 from app.domain import billing
 from app.domain.allocation import charge_status
-from app.services import billing_service, expense_service, notification_service, settings_service
+from app.services import (
+    billing_service,
+    expense_service,
+    notification_service,
+    settings_service,
+    task_service,
+)
+from app.services.task_service import PRIORITY_LABEL
 
 
 async def generate_fixed_expenses(session: AsyncSession, today: date) -> dict:
@@ -122,9 +129,28 @@ async def _mark_overdue(session: AsyncSession, lease_id: int, period: date, toda
             ch.status = charge_status(ch.amount, ch.paid_amount, ch.due_date, today, already_sent=True)
 
 
+async def generate_task_reminders(session: AsyncSession, today: date) -> int:
+    """Напоминания по задачам с наступившей датой (в TG арендодателю)."""
+    count = 0
+    for task in await task_service.due_tasks(session, today):
+        due_str = task.due_date.strftime("%d.%m.%Y") if task.due_date else ""
+        await notification_service.enqueue(
+            session,
+            landlord_id=task.landlord_id,
+            channel=NotifChannel.telegram,
+            type="task_reminder",
+            subject=f"Напоминание по задаче ({PRIORITY_LABEL.get(task.priority, '')})",
+            body=f"{task.title}\nСрок: {due_str}" + (f"\n{task.description}" if task.description else ""),
+        )
+        task_service.mark_reminded(task)
+        count += 1
+    return count
+
+
 async def run_daily(session: AsyncSession, today: date) -> dict:
-    """Ежедневно: напоминание за N дней до срока и обработка просрочки (пеня + квитанция)."""
-    stats = {"reminders": 0, "overdue": 0}
+    """Ежедневно: напоминание за N дней до срока, просрочка (пеня + квитанция), задачи."""
+    stats = {"reminders": 0, "overdue": 0, "task_reminders": 0}
+    stats["task_reminders"] = await generate_task_reminders(session, today)
 
     for lease, landlord_id in await _active_leases(session):
         reminder_days = await settings_service.get_int(session, landlord_id, "reminder_days_before")
