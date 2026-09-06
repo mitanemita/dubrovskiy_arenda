@@ -33,6 +33,7 @@ async def enqueue(
     tenant_id: int | None = None,
     related_charge_id: int | None = None,
     related_payment_id: int | None = None,
+    related_task_id: int | None = None,
 ) -> Notification:
     """Ставит уведомление в очередь (status=queued)."""
     notif = Notification(
@@ -44,6 +45,7 @@ async def enqueue(
         body=body,
         related_charge_id=related_charge_id,
         related_payment_id=related_payment_id,
+        related_task_id=related_task_id,
         status=NotifStatus.queued,
     )
     session.add(notif)

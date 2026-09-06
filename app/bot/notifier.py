@@ -5,7 +5,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards import payment_decision_kb
+from app.bot.keyboards import payment_decision_kb, task_reminder_kb
 from app.db.enums import NotifChannel
 from app.services import notification_dispatch
 from app.utils.logger import logger
@@ -35,6 +35,8 @@ async def dispatch_telegram(session: AsyncSession, send: Sender) -> dict:
         markup = None
         if notif.type == "payment_confirm_request" and notif.related_payment_id:
             markup = payment_decision_kb(notif.related_payment_id)
+        elif notif.type == "task_reminder" and notif.related_task_id:
+            markup = task_reminder_kb(notif.related_task_id)
 
         text = f"<b>{notif.subject or 'Уведомление'}</b>\n{notif.body or ''}".strip()
 
