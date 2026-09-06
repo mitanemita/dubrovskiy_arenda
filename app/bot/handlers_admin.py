@@ -5,7 +5,7 @@ UI-обёртки над сервисами (settings/expense/reading/adjustment
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from aiogram import F, Router
@@ -23,7 +23,7 @@ from aiogram.types import (
 from sqlalchemy import select
 
 from app.db.base import async_session_factory
-from app.db.enums import DataSource, ExpenseCategory, LeaseStatus, TaskPriority
+from app.db.enums import DataSource, ExpenseCategory, LeaseStatus
 from app.db.models import Lease, Meter, Premises, Tenant, User
 from app.services import (
     adjustment_service,
@@ -76,9 +76,11 @@ class ReadingFSM(StatesGroup):
 
 
 class TaskFSM(StatesGroup):
-    title = State()
-    priority = State()
-    due = State()
+    add_title = State()
+    add_priority = State()
+    bulk_titles = State()
+    edit_title = State()
+    edit_priority = State()
 
 
 class PayFSM(StatesGroup):
@@ -336,74 +338,158 @@ async def reading_save(message: Message, state: FSMContext) -> None:
 
 
 # --- Менеджер задач --------------------------------------------------------
+def _priority_kb(context: str, with_keep: bool = False) -> InlineKeyboardMarkup:
+    """Клавиатура выбора приоритета. context: add/bulk/edit."""
+    rows = [[
+        InlineKeyboardButton(text="🔴 1 (3 дня)", callback_data=f"tp:{context}:1"),
+        InlineKeyboardButton(text="🟡 2 (7 дней)", callback_data=f"tp:{context}:2"),
+        InlineKeyboardButton(text="🟢 3 (25 дней)", callback_data=f"tp:{context}:3"),
+    ]]
+    if with_keep:
+        rows.append([InlineKeyboardButton(text="↔️ Не менять приоритет", callback_data="tp:edit:keep")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 @router.message(F.text == "📝 Задачи")
 async def tasks_menu(message: Message) -> None:
     async with async_session_factory() as session:
         lid = await _landlord_id(session, message.from_user.id)
         tasks = await task_service.list_tasks(session, lid) if lid else []
 
-    add_btn = InlineKeyboardButton(text="➕ Новая задача", callback_data="task_add")
-    rows = [[add_btn]]
-    lines = ["<b>📝 Открытые задачи:</b>"]
+    rows = [[
+        InlineKeyboardButton(text="➕ Задача", callback_data="task_add"),
+        InlineKeyboardButton(text="➕ Списком", callback_data="task_bulk"),
+    ]]
+    lines = ["<b>📝 Задачи (ближайшие сверху):</b>"]
     if not tasks:
         lines.append("— пусто")
     for t in tasks:
-        due = f" · до {t.due_date.strftime('%d.%m.%Y')}" if t.due_date else ""
-        lines.append(f"{task_service.PRIORITY_LABEL.get(t.priority, '')} {t.title}{due}")
-        rows.append([InlineKeyboardButton(text=f"✅ Выполнено: {t.title[:20]}", callback_data=f"taskdone:{t.id}")])
+        due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
+        lines.append(f"{task_service.PRIORITY_LABEL.get(t.priority, '')} {t.title} · до {due}")
+        rows.append([
+            InlineKeyboardButton(text=f"✏️ {t.title[:14]}", callback_data=f"taskedit:{t.id}"),
+            InlineKeyboardButton(text="✅", callback_data=f"taskdone:{t.id}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"taskdel:{t.id}"),
+        ])
     await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
+# Добавление одной задачи
 @router.callback_query(F.data == "task_add")
 async def task_add_start(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(TaskFSM.title)
+    await state.set_state(TaskFSM.add_title)
     await callback.message.answer("Введите текст задачи:")
     await callback.answer()
 
 
-@router.message(TaskFSM.title)
-async def task_title(message: Message, state: FSMContext) -> None:
+@router.message(TaskFSM.add_title)
+async def task_add_title(message: Message, state: FSMContext) -> None:
     await state.update_data(title=message.text.strip())
-    await state.set_state(TaskFSM.priority)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔴 Высокий", callback_data="tp:high"),
-        InlineKeyboardButton(text="🟡 Средний", callback_data="tp:medium"),
-        InlineKeyboardButton(text="🟢 Низкий", callback_data="tp:low"),
-    ]])
-    await message.answer("Выберите приоритет:", reply_markup=kb)
+    await state.set_state(TaskFSM.add_priority)
+    await message.answer("Выберите приоритет:", reply_markup=_priority_kb("add"))
 
 
-@router.callback_query(TaskFSM.priority, F.data.startswith("tp:"))
-async def task_priority(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(priority=callback.data.split(":", 1)[1])
-    await state.set_state(TaskFSM.due)
-    await callback.message.answer("Дата напоминания в формате ДД.ММ.ГГГГ (или «-» без даты):")
+@router.callback_query(TaskFSM.add_priority, F.data.startswith("tp:add:"))
+async def task_add_priority(callback: CallbackQuery, state: FSMContext) -> None:
+    priority = task_service.NUM_PRIORITY[int(callback.data.split(":")[2])]
+    data = await state.get_data()
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        user = (await session.execute(select(User).where(User.tg_id == callback.from_user.id))).scalar_one_or_none()
+        task = await task_service.create_task(
+            session, landlord_id=lid, title=data["title"], priority=priority,
+            created_by_id=user.id if user else None,
+        )
+        await session.flush()
+        due_str = task.due_date.strftime("%d.%m.%Y")
+        await session.commit()
+    await state.clear()
+    await callback.message.answer(f"✅ Задача добавлена. Срок: {due_str}.", reply_markup=main_menu())
     await callback.answer()
 
 
-@router.message(TaskFSM.due)
-async def task_due(message: Message, state: FSMContext) -> None:
-    text = message.text.strip()
-    due = None
-    if text != "-":
-        try:
-            due = datetime.strptime(text, "%d.%m.%Y").date()
-        except ValueError:
-            await message.answer("❌ Формат ДД.ММ.ГГГГ или «-». Повторите:")
-            return
+# Добавление списком
+@router.callback_query(F.data == "task_bulk")
+async def task_bulk_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(TaskFSM.bulk_titles)
+    await callback.message.answer("Выберите приоритет для всех задач списка:", reply_markup=_priority_kb("bulk"))
+    await callback.answer()
+
+
+@router.callback_query(TaskFSM.bulk_titles, F.data.startswith("tp:bulk:"))
+async def task_bulk_priority(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(priority=int(callback.data.split(":")[2]))
+    await callback.message.answer("Пришлите задачи списком — по одной на строку:")
+    await callback.answer()
+
+
+@router.message(TaskFSM.bulk_titles)
+async def task_bulk_save(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
+    if "priority" not in data:
+        await message.answer("Сначала выберите приоритет кнопкой выше.")
+        return
+    titles = [ln for ln in message.text.splitlines() if ln.strip()]
+    if not titles:
+        await message.answer("❌ Пусто. Пришлите задачи по одной на строку:")
+        return
+    priority = task_service.NUM_PRIORITY[data["priority"]]
     async with async_session_factory() as session:
         lid = await _landlord_id(session, message.from_user.id)
         user = (await session.execute(select(User).where(User.tg_id == message.from_user.id))).scalar_one_or_none()
-        await task_service.create_task(
-            session, landlord_id=lid, title=data["title"],
-            priority=TaskPriority(data["priority"]), due_date=due,
+        created = await task_service.create_tasks_bulk(
+            session, landlord_id=lid, titles=titles, priority=priority,
             created_by_id=user.id if user else None,
         )
         await session.commit()
     await state.clear()
-    due_str = f" (напомню {due.strftime('%d.%m.%Y')})" if due else ""
-    await message.answer(f"✅ Задача добавлена{due_str}.", reply_markup=main_menu())
+    await message.answer(f"✅ Добавлено задач: {len(created)}.", reply_markup=main_menu())
+
+
+# Редактирование
+@router.callback_query(F.data.startswith("taskedit:"))
+async def task_edit_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(edit_id=int(callback.data.split(":", 1)[1]))
+    await state.set_state(TaskFSM.edit_title)
+    await callback.message.answer("Новый текст задачи (или «-» чтобы оставить как есть):")
+    await callback.answer()
+
+
+@router.message(TaskFSM.edit_title)
+async def task_edit_title(message: Message, state: FSMContext) -> None:
+    text = message.text.strip()
+    await state.update_data(new_title=None if text == "-" else text)
+    await state.set_state(TaskFSM.edit_priority)
+    await message.answer("Новый приоритет:", reply_markup=_priority_kb("edit", with_keep=True))
+
+
+@router.callback_query(TaskFSM.edit_priority, F.data.startswith("tp:edit:"))
+async def task_edit_priority(callback: CallbackQuery, state: FSMContext) -> None:
+    raw = callback.data.split(":")[2]
+    priority = None if raw == "keep" else task_service.NUM_PRIORITY[int(raw)]
+    data = await state.get_data()
+    async with async_session_factory() as session:
+        await task_service.update_task(
+            session, data["edit_id"], title=data.get("new_title"), priority=priority
+        )
+        await session.commit()
+    await state.clear()
+    await callback.message.answer("✅ Задача изменена.", reply_markup=main_menu())
+    await callback.answer()
+
+
+# Удаление и выполнение
+@router.callback_query(F.data.startswith("taskdel:"))
+async def task_delete(callback: CallbackQuery) -> None:
+    task_id = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        await task_service.delete_task(session, task_id)
+        await session.commit()
+    await callback.answer("Задача удалена")
+    try:
+        await callback.message.edit_text("🗑 Задача удалена.")
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("taskdone:"))

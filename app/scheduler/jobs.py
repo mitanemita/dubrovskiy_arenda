@@ -130,20 +130,37 @@ async def _mark_overdue(session: AsyncSession, lease_id: int, period: date, toda
 
 
 async def generate_task_reminders(session: AsyncSession, today: date) -> int:
-    """Напоминания по задачам с наступившей датой (в TG арендодателю)."""
+    """Напоминания по задачам: предварительное (за N дней) и в день срока."""
+    from datetime import timedelta
+
     count = 0
-    for task in await task_service.due_tasks(session, today):
-        due_str = task.due_date.strftime("%d.%m.%Y") if task.due_date else ""
-        await notification_service.enqueue(
-            session,
-            landlord_id=task.landlord_id,
-            channel=NotifChannel.telegram,
-            type="task_reminder",
-            subject=f"Напоминание по задаче ({PRIORITY_LABEL.get(task.priority, '')})",
-            body=f"{task.title}\nСрок: {due_str}" + (f"\n{task.description}" if task.description else ""),
-        )
-        task_service.mark_reminded(task)
-        count += 1
+    for task in await task_service.open_with_due(session):
+        due = task.due_date
+        lead = task_service.LEAD_DAYS.get(task.priority, 1)
+        pre_day = due - timedelta(days=lead)
+        due_str = due.strftime("%d.%m.%Y")
+
+        # Предварительное напоминание (за N дней)
+        if not task.remind_pre_sent and pre_day <= today < due:
+            await notification_service.enqueue(
+                session, landlord_id=task.landlord_id, channel=NotifChannel.telegram,
+                type="task_reminder",
+                subject=f"Скоро срок задачи ({PRIORITY_LABEL.get(task.priority, '')})",
+                body=f"{task.title}\nСрок: {due_str}" + (f"\n{task.description}" if task.description else ""),
+            )
+            task.remind_pre_sent = True
+            count += 1
+
+        # Напоминание в день срока (и позже, если пропущено)
+        if not task.remind_due_sent and today >= due:
+            await notification_service.enqueue(
+                session, landlord_id=task.landlord_id, channel=NotifChannel.telegram,
+                type="task_reminder",
+                subject=f"Сегодня срок задачи ({PRIORITY_LABEL.get(task.priority, '')})",
+                body=f"{task.title}\nСрок: {due_str}" + (f"\n{task.description}" if task.description else ""),
+            )
+            task.remind_due_sent = True
+            count += 1
     return count
 
 
