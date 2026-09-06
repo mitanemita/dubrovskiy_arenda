@@ -367,11 +367,13 @@ class Task(TimestampMixin, Base):
     priority: Mapped[enums.TaskPriority] = mapped_column(
         _enum(enums.TaskPriority, "task_priority"), nullable=False, default=enums.TaskPriority.medium
     )
-    due_date: Mapped[date | None] = mapped_column(Date)  # дата напоминания
+    due_date: Mapped[date | None] = mapped_column(Date)  # срок (вычисляется из приоритета)
     status: Mapped[enums.TaskStatus] = mapped_column(
         _enum(enums.TaskStatus, "task_status"), nullable=False, default=enums.TaskStatus.open
     )
-    remind_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Два напоминания: предварительное (за N дней) и в день срока
+    remind_pre_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    remind_due_sent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
 
 

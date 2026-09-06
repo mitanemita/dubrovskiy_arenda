@@ -46,43 +46,77 @@ async def lease(session, landlord):
 
 
 # --- Задачи ---
-async def test_create_and_list_sorted_by_priority(session, landlord):
-    await task_service.create_task(session, landlord_id=landlord.id, title="Низкая", priority=TaskPriority.low)
-    await task_service.create_task(session, landlord_id=landlord.id, title="Высокая", priority=TaskPriority.high)
-    await task_service.create_task(session, landlord_id=landlord.id, title="Средняя", priority=TaskPriority.medium)
+async def test_due_date_from_priority(session, landlord):
+    # приоритет 1 -> 3 дня, 2 -> 7, 3 -> 25
+    t1 = await task_service.create_task(session, landlord_id=landlord.id, title="P1",
+                                        priority=TaskPriority.high, today=date(2026, 4, 1))
+    t2 = await task_service.create_task(session, landlord_id=landlord.id, title="P2",
+                                        priority=TaskPriority.medium, today=date(2026, 4, 1))
+    t3 = await task_service.create_task(session, landlord_id=landlord.id, title="P3",
+                                        priority=TaskPriority.low, today=date(2026, 4, 1))
     await session.flush()
+    assert t1.due_date == date(2026, 4, 4)
+    assert t2.due_date == date(2026, 4, 8)
+    assert t3.due_date == date(2026, 4, 26)
 
+
+async def test_list_sorted_nearest_first(session, landlord):
+    await task_service.create_task(session, landlord_id=landlord.id, title="Дальняя",
+                                   priority=TaskPriority.low, today=date(2026, 4, 1))    # due 26.04
+    await task_service.create_task(session, landlord_id=landlord.id, title="Ближняя",
+                                   priority=TaskPriority.high, today=date(2026, 4, 1))   # due 04.04
+    await session.flush()
     tasks = await task_service.list_tasks(session, landlord.id)
-    assert [t.title for t in tasks] == ["Высокая", "Средняя", "Низкая"]
+    assert [t.title for t in tasks] == ["Ближняя", "Дальняя"]
 
 
-async def test_mark_done_hides_from_open_list(session, landlord):
-    t = await task_service.create_task(session, landlord_id=landlord.id, title="Задача")
+async def test_bulk_create(session, landlord):
+    created = await task_service.create_tasks_bulk(
+        session, landlord_id=landlord.id,
+        titles=["Задача A", "  ", "Задача B", "Задача C"], priority=TaskPriority.medium,
+    )
     await session.flush()
-    await task_service.mark_done(session, t.id)
+    assert len(created) == 3  # пустая строка пропущена
+    assert len(await task_service.list_tasks(session, landlord.id)) == 3
+
+
+async def test_edit_recomputes_due_and_resets_reminders(session, landlord):
+    t = await task_service.create_task(session, landlord_id=landlord.id, title="Старая",
+                                       priority=TaskPriority.high, today=date(2026, 4, 1))
     await session.flush()
-    assert t.status == TaskStatus.done
+    t.remind_pre_sent = True
+    t.remind_due_sent = True
+    await session.flush()
+
+    await task_service.update_task(session, t.id, title="Новая", priority=TaskPriority.low)
+    await session.flush()
+    assert t.title == "Новая"
+    assert t.due_date == t.created_at.date() + __import__("datetime").timedelta(days=25)
+    assert t.remind_pre_sent is False and t.remind_due_sent is False
+
+
+async def test_delete_task(session, landlord):
+    t = await task_service.create_task(session, landlord_id=landlord.id, title="Удалить")
+    await session.flush()
+    assert await task_service.delete_task(session, t.id) is True
+    await session.flush()
     assert await task_service.list_tasks(session, landlord.id) == []
 
 
-async def test_task_reminder_on_due_date(session, landlord):
-    await task_service.create_task(
-        session, landlord_id=landlord.id, title="Позвонить юристу",
-        priority=TaskPriority.high, due_date=date(2026, 4, 10),
-    )
+async def test_reminders_pre_and_due(session, landlord):
+    # приоритет 1: срок через 3 дня, предвар. за 1 день (03.04), в день (04.04)
+    await task_service.create_task(session, landlord_id=landlord.id, title="Сдать отчёт",
+                                   priority=TaskPriority.high, today=date(2026, 4, 1))
     await session.flush()
 
-    # до срока — тишина
-    assert await jobs.generate_task_reminders(session, date(2026, 4, 9)) == 0
-    # в срок — напоминание
-    assert await jobs.generate_task_reminders(session, date(2026, 4, 10)) == 1
-    await session.flush()
-    notif = (await session.execute(select(Notification).where(Notification.type == "task_reminder"))).scalars().first()
-    assert notif is not None and notif.channel == NotifChannel.telegram
-    assert "Позвонить юристу" in notif.body
+    assert await jobs.generate_task_reminders(session, date(2026, 4, 2)) == 0  # рано
+    assert await jobs.generate_task_reminders(session, date(2026, 4, 3)) == 1  # за 1 день
+    assert await jobs.generate_task_reminders(session, date(2026, 4, 3)) == 0  # не дублируется
+    assert await jobs.generate_task_reminders(session, date(2026, 4, 4)) == 1  # в день срока
+    assert await jobs.generate_task_reminders(session, date(2026, 4, 5)) == 0  # уже отправлено
 
-    # повторно не дублируется (remind_sent)
-    assert await jobs.generate_task_reminders(session, date(2026, 4, 11)) == 0
+    notifs = (await session.execute(select(Notification).where(Notification.type == "task_reminder"))).scalars().all()
+    assert len(notifs) == 2 and all(n.channel == NotifChannel.telegram for n in notifs)
 
 
 # --- Ручная отметка оплаты ---
