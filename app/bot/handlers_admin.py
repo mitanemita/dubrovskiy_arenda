@@ -5,7 +5,7 @@ UI-обёртки над сервисами (settings/expense/reading/adjustment
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from aiogram import F, Router
@@ -78,9 +78,11 @@ class ReadingFSM(StatesGroup):
 class TaskFSM(StatesGroup):
     add_title = State()
     add_priority = State()
+    add_date = State()
     bulk_titles = State()
     edit_title = State()
     edit_priority = State()
+    edit_date = State()
 
 
 class PayFSM(StatesGroup):
@@ -112,6 +114,14 @@ def _parse_amount(text: str) -> Decimal | None:
     try:
         return Decimal(text.replace(",", ".").replace(" ", ""))
     except (InvalidOperation, ValueError):
+        return None
+
+
+def _parse_date(text: str) -> date | None:
+    """Парсит дату ДД.ММ.ГГГГ."""
+    try:
+        return datetime.strptime(text.strip(), "%d.%m.%Y").date()
+    except ValueError:
         return None
 
 
@@ -338,15 +348,20 @@ async def reading_save(message: Message, state: FSMContext) -> None:
 
 
 # --- Менеджер задач --------------------------------------------------------
-def _priority_kb(context: str, with_keep: bool = False) -> InlineKeyboardMarkup:
-    """Клавиатура выбора приоритета. context: add/bulk/edit."""
+def _priority_kb(context: str, with_keep: bool = False, with_date: bool = False) -> InlineKeyboardMarkup:
+    """Клавиатура выбора приоритета/даты. context: add/bulk/edit."""
     rows = [[
         InlineKeyboardButton(text="🔴 1 (3 дня)", callback_data=f"tp:{context}:1"),
         InlineKeyboardButton(text="🟡 2 (7 дней)", callback_data=f"tp:{context}:2"),
         InlineKeyboardButton(text="🟢 3 (25 дней)", callback_data=f"tp:{context}:3"),
     ]]
+    extra = []
+    if with_date:
+        extra.append(InlineKeyboardButton(text="📅 На дату", callback_data=f"tp:{context}:date"))
     if with_keep:
-        rows.append([InlineKeyboardButton(text="↔️ Не менять приоритет", callback_data="tp:edit:keep")])
+        extra.append(InlineKeyboardButton(text="↔️ Не менять", callback_data="tp:edit:keep"))
+    if extra:
+        rows.append(extra)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -386,24 +401,54 @@ async def task_add_start(callback: CallbackQuery, state: FSMContext) -> None:
 async def task_add_title(message: Message, state: FSMContext) -> None:
     await state.update_data(title=message.text.strip())
     await state.set_state(TaskFSM.add_priority)
-    await message.answer("Выберите приоритет:", reply_markup=_priority_kb("add"))
+    await message.answer(
+        "Выберите приоритет (задаёт срок) или «На дату»:",
+        reply_markup=_priority_kb("add", with_date=True),
+    )
 
 
-@router.callback_query(TaskFSM.add_priority, F.data.startswith("tp:add:"))
-async def task_add_priority(callback: CallbackQuery, state: FSMContext) -> None:
-    priority = task_service.NUM_PRIORITY[int(callback.data.split(":")[2])]
+async def _create_task_and_reply(callback_or_msg, state, *, priority, due_date, user_tg_id):
+    """Создаёт задачу и отвечает пользователю (общий код для приоритета/даты)."""
     data = await state.get_data()
     async with async_session_factory() as session:
-        lid = await _landlord_id(session, callback.from_user.id)
-        user = (await session.execute(select(User).where(User.tg_id == callback.from_user.id))).scalar_one_or_none()
+        lid = await _landlord_id(session, user_tg_id)
+        user = (await session.execute(select(User).where(User.tg_id == user_tg_id))).scalar_one_or_none()
         task = await task_service.create_task(
             session, landlord_id=lid, title=data["title"], priority=priority,
-            created_by_id=user.id if user else None,
+            due_date=due_date, created_by_id=user.id if user else None,
         )
         await session.flush()
         due_str = task.due_date.strftime("%d.%m.%Y")
         await session.commit()
     await state.clear()
+    return due_str
+
+
+@router.callback_query(TaskFSM.add_priority, F.data == "tp:add:date")
+async def task_add_pick_date(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(TaskFSM.add_date)
+    await callback.message.answer("Введите дату задачи в формате ДД.ММ.ГГГГ:")
+    await callback.answer()
+
+
+@router.message(TaskFSM.add_date)
+async def task_add_date(message: Message, state: FSMContext) -> None:
+    due = _parse_date(message.text)
+    if due is None:
+        await message.answer("❌ Формат ДД.ММ.ГГГГ. Повторите:")
+        return
+    due_str = await _create_task_and_reply(
+        message, state, priority=task_service.TaskPriority.medium, due_date=due, user_tg_id=message.from_user.id
+    )
+    await message.answer(f"✅ Задача добавлена на {due_str}.", reply_markup=main_menu())
+
+
+@router.callback_query(TaskFSM.add_priority, F.data.startswith("tp:add:"))
+async def task_add_priority(callback: CallbackQuery, state: FSMContext) -> None:
+    priority = task_service.NUM_PRIORITY[int(callback.data.split(":")[2])]
+    due_str = await _create_task_and_reply(
+        callback, state, priority=priority, due_date=None, user_tg_id=callback.from_user.id
+    )
     await callback.message.answer(f"✅ Задача добавлена. Срок: {due_str}.", reply_markup=main_menu())
     await callback.answer()
 
@@ -460,7 +505,51 @@ async def task_edit_title(message: Message, state: FSMContext) -> None:
     text = message.text.strip()
     await state.update_data(new_title=None if text == "-" else text)
     await state.set_state(TaskFSM.edit_priority)
-    await message.answer("Новый приоритет:", reply_markup=_priority_kb("edit", with_keep=True))
+    await message.answer(
+        "Новый приоритет, дата или без изменений:",
+        reply_markup=_priority_kb("edit", with_keep=True, with_date=True),
+    )
+
+
+# Смена категории из напоминания
+@router.callback_query(F.data.startswith("taskcat:"))
+async def task_reassign_category(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(edit_id=int(callback.data.split(":", 1)[1]), new_title=None)
+    await state.set_state(TaskFSM.edit_priority)
+    await callback.message.answer("Новая категория задачи:", reply_markup=_priority_kb("edit", with_date=True))
+    await callback.answer()
+
+
+# Перенос на дату из напоминания
+@router.callback_query(F.data.startswith("taskdate:"))
+async def task_reassign_date(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(edit_id=int(callback.data.split(":", 1)[1]), new_title=None)
+    await state.set_state(TaskFSM.edit_date)
+    await callback.message.answer("Новая дата задачи в формате ДД.ММ.ГГГГ:")
+    await callback.answer()
+
+
+@router.callback_query(TaskFSM.edit_priority, F.data == "tp:edit:date")
+async def task_edit_pick_date(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(TaskFSM.edit_date)
+    await callback.message.answer("Новая дата задачи в формате ДД.ММ.ГГГГ:")
+    await callback.answer()
+
+
+@router.message(TaskFSM.edit_date)
+async def task_edit_date(message: Message, state: FSMContext) -> None:
+    due = _parse_date(message.text)
+    if due is None:
+        await message.answer("❌ Формат ДД.ММ.ГГГГ. Повторите:")
+        return
+    data = await state.get_data()
+    async with async_session_factory() as session:
+        if data.get("new_title"):
+            await task_service.update_task(session, data["edit_id"], title=data["new_title"])
+        await task_service.set_due_date(session, data["edit_id"], due)
+        await session.commit()
+    await state.clear()
+    await message.answer(f"✅ Задача перенесена на {due.strftime('%d.%m.%Y')}.", reply_markup=main_menu())
 
 
 @router.callback_query(TaskFSM.edit_priority, F.data.startswith("tp:edit:"))

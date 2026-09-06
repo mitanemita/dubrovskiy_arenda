@@ -78,3 +78,21 @@ async def test_dispatch_confirm_request_has_buttons(session, env):
     # в клавиатуре есть callback с id платежа
     cbs = [btn.callback_data for row in markup.inline_keyboard for btn in row]
     assert f"pay:{payment.id}:ok" in cbs and f"pay:{payment.id}:no" in cbs
+
+
+async def test_task_reminder_has_action_buttons(session, env):
+    from app.bot import notifier
+
+    notif = await notification_service.enqueue(
+        session, landlord_id=env["landlord"].id, channel=NotifChannel.telegram,
+        type="task_reminder", subject="Срок задачи", body="Сдать отчёт", related_task_id=42,
+    )
+    await session.flush()
+
+    fake = FakeSender()
+    await notifier.dispatch_telegram(session, fake)
+    await session.flush()
+
+    assert notif.status == NotifStatus.sent
+    cbs = [btn.callback_data for row in fake.calls[0]["markup"].inline_keyboard for btn in row]
+    assert "taskdone:42" in cbs and "taskcat:42" in cbs and "taskdate:42" in cbs

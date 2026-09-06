@@ -349,6 +349,7 @@ class Notification(TimestampMixin, Base):
     body: Mapped[str | None] = mapped_column(Text)
     related_charge_id: Mapped[int | None] = mapped_column(ForeignKey("charges.id", ondelete="SET NULL"))
     related_payment_id: Mapped[int | None] = mapped_column(ForeignKey("payments.id", ondelete="SET NULL"))
+    related_task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
     status: Mapped[enums.NotifStatus] = mapped_column(
         _enum(enums.NotifStatus, "notif_status"), nullable=False, default=enums.NotifStatus.queued
     )

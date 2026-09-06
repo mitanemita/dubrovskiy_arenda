@@ -147,6 +147,7 @@ async def generate_task_reminders(session: AsyncSession, today: date) -> int:
                 type="task_reminder",
                 subject=f"Скоро срок задачи ({PRIORITY_LABEL.get(task.priority, '')})",
                 body=f"{task.title}\nСрок: {due_str}" + (f"\n{task.description}" if task.description else ""),
+                related_task_id=task.id,
             )
             task.remind_pre_sent = True
             count += 1
@@ -158,6 +159,7 @@ async def generate_task_reminders(session: AsyncSession, today: date) -> int:
                 type="task_reminder",
                 subject=f"Сегодня срок задачи ({PRIORITY_LABEL.get(task.priority, '')})",
                 body=f"{task.title}\nСрок: {due_str}" + (f"\n{task.description}" if task.description else ""),
+                related_task_id=task.id,
             )
             task.remind_due_sent = True
             count += 1

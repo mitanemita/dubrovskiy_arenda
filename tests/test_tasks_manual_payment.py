@@ -95,6 +95,39 @@ async def test_edit_recomputes_due_and_resets_reminders(session, landlord):
     assert t.remind_pre_sent is False and t.remind_due_sent is False
 
 
+async def test_create_with_manual_date(session, landlord):
+    t = await task_service.create_task(
+        session, landlord_id=landlord.id, title="На число",
+        priority=TaskPriority.medium, due_date=date(2026, 12, 31),
+    )
+    await session.flush()
+    assert t.due_date == date(2026, 12, 31)
+
+
+async def test_set_due_date_resets_reminders(session, landlord):
+    t = await task_service.create_task(session, landlord_id=landlord.id, title="Перенос",
+                                       priority=TaskPriority.high, today=date(2026, 4, 1))
+    await session.flush()
+    t.remind_pre_sent = True
+    t.remind_due_sent = True
+    await session.flush()
+
+    await task_service.set_due_date(session, t.id, date(2026, 5, 20))
+    await session.flush()
+    assert t.due_date == date(2026, 5, 20)
+    assert t.remind_pre_sent is False and t.remind_due_sent is False
+
+
+async def test_reminder_carries_task_id(session, landlord):
+    await task_service.create_task(session, landlord_id=landlord.id, title="С кнопками",
+                                   priority=TaskPriority.high, today=date(2026, 4, 1))
+    await session.flush()
+    await jobs.generate_task_reminders(session, date(2026, 4, 4))  # день срока
+    await session.flush()
+    notif = (await session.execute(select(Notification).where(Notification.type == "task_reminder"))).scalars().first()
+    assert notif is not None and notif.related_task_id is not None
+
+
 async def test_delete_task(session, landlord):
     t = await task_service.create_task(session, landlord_id=landlord.id, title="Удалить")
     await session.flush()

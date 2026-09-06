@@ -41,18 +41,31 @@ async def create_task(
     priority: TaskPriority = TaskPriority.medium,
     description: str | None = None,
     created_by_id: int | None = None,
+    due_date: date | None = None,
     today: date | None = None,
 ) -> Task:
+    """Создаёт задачу. Срок — из приоритета, либо явный (due_date, «на число»)."""
     today = today or date.today()
     task = Task(
         landlord_id=landlord_id,
         title=title,
         priority=priority,
-        due_date=due_from_priority(priority, today),
+        due_date=due_date or due_from_priority(priority, today),
         description=description,
         created_by_id=created_by_id,
     )
     session.add(task)
+    return task
+
+
+async def set_due_date(session: AsyncSession, task_id: int, due_date: date) -> Task | None:
+    """Переносит задачу на конкретную дату и сбрасывает флаги напоминаний."""
+    task = await session.get(Task, task_id)
+    if task is None:
+        return None
+    task.due_date = due_date
+    task.remind_pre_sent = False
+    task.remind_due_sent = False
     return task
 
 
