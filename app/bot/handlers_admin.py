@@ -453,37 +453,33 @@ async def task_add_priority(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-# Добавление списком
+# Добавление списком (приоритет/дата — в конце каждой строки)
 @router.callback_query(F.data == "task_bulk")
 async def task_bulk_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TaskFSM.bulk_titles)
-    await callback.message.answer("Выберите приоритет для всех задач списка:", reply_markup=_priority_kb("bulk"))
-    await callback.answer()
-
-
-@router.callback_query(TaskFSM.bulk_titles, F.data.startswith("tp:bulk:"))
-async def task_bulk_priority(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(priority=int(callback.data.split(":")[2]))
-    await callback.message.answer("Пришлите задачи списком — по одной на строку:")
+    await callback.message.answer(
+        "Пришлите задачи списком — по одной на строку.\n"
+        "В конце строки укажите приоритет <b>1</b>/<b>2</b>/<b>3</b> или дату <b>ДД.ММ.ГГГГ</b>.\n"
+        "Если ничего не указано — приоритет 2.\n\n"
+        "Пример:\n"
+        "<code>Позвонить электрику 1\n"
+        "Уборка территории 3\n"
+        "Вывоз камней литера А 15.12.2026</code>"
+    )
     await callback.answer()
 
 
 @router.message(TaskFSM.bulk_titles)
 async def task_bulk_save(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    if "priority" not in data:
-        await message.answer("Сначала выберите приоритет кнопкой выше.")
-        return
-    titles = [ln for ln in message.text.splitlines() if ln.strip()]
-    if not titles:
+    lines = [ln for ln in message.text.splitlines() if ln.strip()]
+    if not lines:
         await message.answer("❌ Пусто. Пришлите задачи по одной на строку:")
         return
-    priority = task_service.NUM_PRIORITY[data["priority"]]
     async with async_session_factory() as session:
         lid = await _landlord_id(session, message.from_user.id)
         user = (await session.execute(select(User).where(User.tg_id == message.from_user.id))).scalar_one_or_none()
-        created = await task_service.create_tasks_bulk(
-            session, landlord_id=lid, titles=titles, priority=priority,
+        created = await task_service.create_tasks_from_lines(
+            session, landlord_id=lid, lines=lines,
             created_by_id=user.id if user else None,
         )
         await session.commit()

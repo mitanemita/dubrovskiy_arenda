@@ -5,13 +5,19 @@
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+import re
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.enums import TaskPriority, TaskStatus
 from app.db.models import Task
+
+# Ведущая нумерация строки: "12." или "12)"
+_LEADING_NUM = re.compile(r"^\s*\d+[.)]\s*")
+# Дата в конце строки: ДД.ММ.ГГ или ДД.ММ.ГГГГ
+_TRAILING_DATE = re.compile(r"(\d{1,2}\.\d{1,2}\.\d{2,4})\s*$")
 
 # Приоритет -> число (для отображения) и обратно
 PRIORITY_NUM = {TaskPriority.high: 1, TaskPriority.medium: 2, TaskPriority.low: 3}
@@ -78,7 +84,7 @@ async def create_tasks_bulk(
     created_by_id: int | None = None,
     today: date | None = None,
 ) -> list[Task]:
-    """Добавляет несколько задач списком (по одной на строку)."""
+    """Добавляет несколько задач списком (по одной на строку, единый приоритет)."""
     tasks = []
     for title in titles:
         title = title.strip()
@@ -87,6 +93,68 @@ async def create_tasks_bulk(
                 session, landlord_id=landlord_id, title=title, priority=priority,
                 created_by_id=created_by_id, today=today,
             ))
+    return tasks
+
+
+def parse_task_line(line: str, *, default_priority: TaskPriority = TaskPriority.medium) -> tuple[str, TaskPriority, date | None] | None:
+    """Разбирает строку списка: «текст ... <приоритет 1/2/3 | дата ДД.ММ.ГГГГ>».
+
+    Возвращает (текст, приоритет, дата|None) либо None, если строка пустая.
+    Ведущая нумерация («12.») отбрасывается. Если в конце нет метки —
+    берётся приоритет по умолчанию.
+    """
+    line = _LEADING_NUM.sub("", line.strip())
+    if not line:
+        return None
+
+    priority = default_priority
+    due: date | None = None
+
+    # Дата в конце строки
+    m = _TRAILING_DATE.search(line)
+    if m:
+        raw = m.group(1)
+        for fmt in ("%d.%m.%Y", "%d.%m.%y"):
+            try:
+                due = datetime.strptime(raw, fmt).date()
+                break
+            except ValueError:
+                continue
+        if due is not None:
+            line = line[: m.start()].strip()
+    else:
+        # Приоритет (последний токен 1/2/3)
+        parts = line.rsplit(maxsplit=1)
+        if len(parts) == 2 and parts[1] in ("1", "2", "3"):
+            priority = NUM_PRIORITY[int(parts[1])]
+            line = parts[0].strip()
+
+    line = line.strip(" .,-—")
+    if not line:
+        return None
+    return line, priority, due
+
+
+async def create_tasks_from_lines(
+    session: AsyncSession,
+    *,
+    landlord_id: int,
+    lines: list[str],
+    default_priority: TaskPriority = TaskPriority.medium,
+    created_by_id: int | None = None,
+    today: date | None = None,
+) -> list[Task]:
+    """Создаёт задачи из строк списка, где приоритет/дата указаны в конце строки."""
+    tasks = []
+    for raw in lines:
+        parsed = parse_task_line(raw, default_priority=default_priority)
+        if parsed is None:
+            continue
+        title, priority, due = parsed
+        tasks.append(await create_task(
+            session, landlord_id=landlord_id, title=title, priority=priority,
+            due_date=due, created_by_id=created_by_id, today=today,
+        ))
     return tasks
 
 
