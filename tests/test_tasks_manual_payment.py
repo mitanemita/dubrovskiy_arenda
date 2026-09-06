@@ -70,6 +70,52 @@ async def test_list_sorted_nearest_first(session, landlord):
     assert [t.title for t in tasks] == ["Ближняя", "Дальняя"]
 
 
+def test_parse_task_line_priority():
+    title, pri, due = task_service.parse_task_line("Позвонить электрику 1")
+    assert title == "Позвонить электрику" and pri == TaskPriority.high and due is None
+
+
+def test_parse_task_line_default_priority():
+    title, pri, due = task_service.parse_task_line("Задача без метки")
+    assert title == "Задача без метки" and pri == TaskPriority.medium and due is None
+
+
+def test_parse_task_line_date():
+    title, pri, due = task_service.parse_task_line("Вывоз камней литера А 15.12.2026")
+    assert title == "Вывоз камней литера А" and due == date(2026, 12, 15)
+
+
+def test_parse_task_line_strips_leading_number():
+    title, pri, due = task_service.parse_task_line("12. Уборка помещений 3")
+    assert title == "Уборка помещений" and pri == TaskPriority.low
+
+
+def test_parse_task_line_keeps_numbers_in_title():
+    # число внутри текста не считается приоритетом, только последний токен
+    title, pri, due = task_service.parse_task_line("ждем смету дмитрий строитель 258 кв. м. 1")
+    assert title == "ждем смету дмитрий строитель 258 кв. м" and pri == TaskPriority.high
+
+
+async def test_create_from_lines_mixed(session, landlord):
+    lines = [
+        "1. Позвонить электрику 1",
+        "Уборка территории 3",
+        "Вывоз камней литера А 15.12.2026",
+        "Задача без метки",
+        "   ",
+    ]
+    created = await task_service.create_tasks_from_lines(
+        session, landlord_id=landlord.id, lines=lines, today=date(2026, 9, 6)
+    )
+    await session.flush()
+    assert len(created) == 4
+    by_title = {t.title: t for t in created}
+    assert by_title["Позвонить электрику"].priority == TaskPriority.high
+    assert by_title["Уборка территории"].priority == TaskPriority.low
+    assert by_title["Вывоз камней литера А"].due_date == date(2026, 12, 15)
+    assert by_title["Задача без метки"].priority == TaskPriority.medium
+
+
 async def test_bulk_create(session, landlord):
     created = await task_service.create_tasks_bulk(
         session, landlord_id=landlord.id,
