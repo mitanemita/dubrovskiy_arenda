@@ -24,7 +24,7 @@ from app.bot.keyboards import back_kb, main_menu_kb
 from app.db.enums import ChargeType, LeaseStatus
 from app.db.base import async_session_factory
 from app.db.models import Lease, Tenant
-from app.email.sender import send_email
+from app.email.sender import send_email, smtp_check
 from app.services import admin_service, document_service
 from app.services.billing_service import period_start
 from app.utils.logger import logger
@@ -38,6 +38,7 @@ def _admin_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🗑 Очистить все данные", callback_data="adm:wipe_confirm")],
         [InlineKeyboardButton(text="📧 УПД на почту", callback_data="adm:doc_upd"),
          InlineKeyboardButton(text="📧 Квитанция на почту", callback_data="adm:doc_receipt")],
+        [InlineKeyboardButton(text="🔌 Тест SMTP (без отправки)", callback_data="adm:smtp")],
         [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
     ])
 
@@ -173,10 +174,39 @@ async def admin_send_mail(callback: CallbackQuery, state: FSMContext) -> None:
         await send_email(pkg["to"], pkg["subject"], pkg["body"], attachment=pkg["pdf"], filename=pkg["filename"])
     except Exception as exc:  # noqa: BLE001 — реальная причина (проверка SMTP)
         logger.exception("Ошибка отправки письма")
-        await edit_or_send(callback.message, f"❌ Не отправлено на {pkg['to']}:\n{exc}", reply_markup=back_kb())
+        await edit_or_send(
+            callback.message,
+            f"❌ Не отправлено на {pkg['to']}:\n{exc}\n\n"
+            "Похоже на сетевую проблему: сервер не может подключиться к SMTP. "
+            "Проверьте «🔌 Тест SMTP», попробуйте SMTP_PORT=587 в .env, или "
+            "разрешите исходящий SMTP у провайдера.",
+            reply_markup=back_kb(),
+        )
         return
     await edit_or_send(callback.message,
         f"✅ Отправлено на {pkg['to']}\nТема: {pkg['subject']}", reply_markup=back_kb())
+
+
+@router.callback_query(F.data == "adm:smtp")
+async def admin_smtp_test(callback: CallbackQuery, state: FSMContext) -> None:
+    """Проверка доступности SMTP и логина без отправки письма."""
+    await state.clear()
+    await callback.answer("Проверяю…")
+    await edit_or_send(callback.message, "⏳ Проверяю подключение к SMTP…")
+    try:
+        info = await smtp_check()
+    except Exception as exc:  # noqa: BLE001 — показываем реальную причину
+        logger.exception("Ошибка проверки SMTP")
+        await edit_or_send(
+            callback.message,
+            f"❌ SMTP недоступен:\n{exc}\n\n"
+            "Частая причина — провайдер/фаервол блокирует исходящий SMTP. "
+            "Попробуйте SMTP_PORT=587 в .env; если и он закрыт — используйте "
+            "почтовый релей/API или отправку через n8n.",
+            reply_markup=back_kb(),
+        )
+        return
+    await edit_or_send(callback.message, f"✅ SMTP OK: {info}", reply_markup=back_kb())
 
 
 @router.callback_query(F.data == "adm:wipe")
