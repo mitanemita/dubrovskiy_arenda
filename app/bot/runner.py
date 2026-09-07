@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
-from aiogram import Bot, Dispatcher
+from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
@@ -29,6 +29,25 @@ def _ui_version() -> str:
     from app.bot.handlers import BOT_UI_VERSION
 
     return BOT_UI_VERSION
+
+
+class FSMCleanupMiddleware(BaseMiddleware):
+    """Удаляет сообщение пользователя, если оно было вводом внутри мастера (FSM).
+
+    В связке с мастерами «в одном сообщении» (wiz_show) это убирает спам:
+    и подсказки бота (правятся на месте), и введённые пользователем значения.
+    """
+
+    async def __call__(self, handler, event, data):
+        state = data.get("state")
+        active = bool(state and await state.get_state())
+        result = await handler(event, data)
+        if active:
+            try:
+                await event.delete()
+            except Exception:
+                pass
+        return result
 
 
 def build_bot() -> Bot:
@@ -71,6 +90,7 @@ async def run() -> None:
 
     bot = build_bot()
     dp = Dispatcher()
+    dp.message.middleware(FSMCleanupMiddleware())
     dp.include_router(router)
     dp.include_router(admin_router)
     dp.include_router(admin_tools_router)

@@ -311,19 +311,31 @@ async def expense_save(message: Message, state: FSMContext) -> None:
 
 
 # Список расходов месяца + правка суммы (с аудитом) — вместо общей «Корректировки»
-@router.callback_query(F.data == "exp_list")
+def _shift_month(period: date, delta: int) -> date:
+    """Сдвигает период на delta месяцев (для навигации по месяцам)."""
+    m = period.month - 1 + delta
+    return date(period.year + m // 12, m % 12 + 1, 1)
+
+
+@router.callback_query(F.data.startswith("exp_list"))
 async def expense_list(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    parts = callback.data.split(":")
+    period = _period_from_code(parts[1]) if len(parts) > 1 else billing_service.period_start(date.today())
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
-        items = await expense_service.list_expenses(session, lid, date.today()) if lid else []
-    lines = ["<b>💸 Расходы за текущий месяц</b> (нажмите № для правки суммы):"]
+        items = await expense_service.list_expenses(session, lid, period) if lid else []
+    lines = [f"<b>💸 Расходы — {_period_ru(period)}</b> (нажмите № для правки суммы):"]
     if not items:
         lines.append("— пусто")
     for i, e in enumerate(items, start=1):
         lines.append(f"{i}. {_EXPENSE_LABELS.get(e.category, e.category.value)}: {e.amount} ₽")
     num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"ecorr:{e.id}") for i, e in enumerate(items, start=1)]
     rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    rows.append([
+        InlineKeyboardButton(text="◀️ Пред. месяц", callback_data=f"exp_list:{_period_code(_shift_month(period, -1))}"),
+        InlineKeyboardButton(text="След. месяц ▶️", callback_data=f"exp_list:{_period_code(_shift_month(period, 1))}"),
+    ])
     rows.append([InlineKeyboardButton(text="◀️ К расходам", callback_data="menu:expense")])
     await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
@@ -335,6 +347,43 @@ async def expense_correct_start(callback: CallbackQuery, state: FSMContext) -> N
     await state.update_data(entity_type="expense", entity_id=int(callback.data.split(":", 1)[1]))
     await state.set_state(AdjustFSM.amount)
     await edit_or_send(callback.message, "Введите новую сумму расхода, ₽:", reply_markup=cancel_kb())
+    await callback.answer()
+
+
+# --- Правка доходов (начислений) по договору за месяц ----------------------
+@router.callback_query(F.data.startswith("lchg:"))
+async def lease_charges_list(callback: CallbackQuery, state: FSMContext) -> None:
+    """Начисления договора за месяц (аренда/электричество/пеня) с правкой суммы."""
+    await state.clear()
+    parts = callback.data.split(":")
+    lease_id = int(parts[1])
+    period = _period_from_code(parts[2]) if len(parts) > 2 else billing_service.period_start(date.today())
+    async with async_session_factory() as session:
+        charges = (await session.execute(
+            select(Charge).where(Charge.lease_id == lease_id, Charge.period == period).order_by(Charge.type)
+        )).scalars().all()
+    lines = [f"<b>💵 Начисления по договору — {_period_ru(period)}</b> (нажмите № для правки суммы):"]
+    if not charges:
+        lines.append("— начислений нет")
+    for i, c in enumerate(charges, start=1):
+        lines.append(f"{i}. {_CHARGE_TYPE_LABEL.get(c.type, c.type.value)}: {c.amount} ₽ (оплачено {c.paid_amount} ₽)")
+    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"ccorr:{c.id}") for i, c in enumerate(charges, start=1)]
+    rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    rows.append([
+        InlineKeyboardButton(text="◀️ Пред. месяц", callback_data=f"lchg:{lease_id}:{_period_code(_shift_month(period, -1))}"),
+        InlineKeyboardButton(text="След. месяц ▶️", callback_data=f"lchg:{lease_id}:{_period_code(_shift_month(period, 1))}"),
+    ])
+    rows.append([InlineKeyboardButton(text="◀️ К договору", callback_data=f"lpick:{lease_id}")])
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ccorr:"))
+async def charge_correct_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.update_data(entity_type="charge", entity_id=int(callback.data.split(":", 1)[1]))
+    await state.set_state(AdjustFSM.amount)
+    await edit_or_send(callback.message, "Введите новую сумму начисления, ₽:", reply_markup=cancel_kb())
     await callback.answer()
 
 
@@ -373,8 +422,10 @@ async def adjust_save(message: Message, state: FSMContext) -> None:
             await state.clear()
             await message.answer(f"❌ {exc}", reply_markup=main_menu_kb())
             return
+    kind = data.get("entity_type")
     await state.clear()
-    await message.answer("✅ Сумма скорректирована (записано в аудит).", reply_markup=_expense_menu_kb())
+    kb = _expense_menu_kb() if kind == "expense" else main_menu_kb()
+    await message.answer("✅ Сумма скорректирована (записано в аудит).", reply_markup=kb)
 
 
 # --- Показания счётчиков (ручной ввод / электричество) --------------------

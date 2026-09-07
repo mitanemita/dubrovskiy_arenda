@@ -603,6 +603,7 @@ async def _render_lease_card(message, lease_id: int) -> bool:
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Аренда ₽", callback_data=f"lrent:{lease_id}"),
          InlineKeyboardButton(text="📅 День оплаты", callback_data=f"lday:{lease_id}")],
+        [InlineKeyboardButton(text="💵 Начисления (правка)", callback_data=f"lchg:{lease_id}")],
         [InlineKeyboardButton(text="🏠 Сменить помещение", callback_data=f"lprem:{lease_id}")],
         [InlineKeyboardButton(text="🗑 Удалить договор", callback_data=f"ldel:{lease_id}")],
         [InlineKeyboardButton(text="◀️ К договорам", callback_data="dir:leases")],
