@@ -11,7 +11,6 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
-    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -25,7 +24,7 @@ from app.bot.keyboards import back_kb, main_menu_kb
 from app.db.enums import ChargeType, LeaseStatus
 from app.db.base import async_session_factory
 from app.db.models import Lease, Tenant
-from app.documents import render
+from app.email.sender import send_email
 from app.services import admin_service, document_service
 from app.services.billing_service import period_start
 from app.utils.logger import logger
@@ -37,8 +36,8 @@ def _admin_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧪 Заполнить тестовыми данными", callback_data="adm:seed")],
         [InlineKeyboardButton(text="🗑 Очистить все данные", callback_data="adm:wipe_confirm")],
-        [InlineKeyboardButton(text="📄 Тест: УПД (аренда)", callback_data="adm:doc_upd"),
-         InlineKeyboardButton(text="🧾 Тест: квитанция", callback_data="adm:doc_receipt")],
+        [InlineKeyboardButton(text="📧 УПД на почту", callback_data="adm:doc_upd"),
+         InlineKeyboardButton(text="📧 Квитанция на почту", callback_data="adm:doc_receipt")],
         [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
     ])
 
@@ -103,7 +102,10 @@ async def admin_wipe_confirm(callback: CallbackQuery, state: FSMContext) -> None
 
 
 async def _send_test_document(callback: CallbackQuery, kind: str) -> None:
-    """Генерирует PDF документа для первого активного договора и присылает его."""
+    """Формирует документ по первому активному договору и ОТПРАВЛЯЕТ его на почту арендатора.
+
+    Проверка работоспособности SMTP: письмо с формальным текстом и PDF-вложением.
+    """
     async with async_session_factory() as session:
         if not await _is_allowed(session, callback.from_user.id):
             await callback.answer("Доступ запрещён", show_alert=True)
@@ -119,21 +121,32 @@ async def _send_test_document(callback: CallbackQuery, kind: str) -> None:
         period = period_start(date.today())
         try:
             if kind == "upd":
-                context = await document_service.build_upd_context(session, lease_id, period, ChargeType.rent)
-                pdf = render.render_pdf("upd.html", context)
-                filename = f"УПД_демо_{lease_id}.pdf"
+                pkg = await document_service.upd_email_package(session, lease_id, period, ChargeType.rent)
             else:
-                pdf, filename = await document_service.receipt_pdf(session, lease_id, period)
+                pkg = await document_service.receipt_email_package(session, lease_id, period)
         except Exception as exc:  # noqa: BLE001 — показываем причину оператору
             logger.exception("Ошибка генерации тестового документа")
             await edit_or_send(callback.message, f"❌ Ошибка генерации документа: {exc}", reply_markup=back_kb())
             await callback.answer()
             return
-    await callback.message.answer_document(
-        BufferedInputFile(pdf, filename=filename),
-        caption="Тестовый документ сгенерирован ✅",
-    )
-    await callback.answer("Документ отправлен")
+
+    if not pkg["to"]:
+        await edit_or_send(callback.message,
+            "У арендатора не указан email. Добавьте его в карточке арендатора.",
+            reply_markup=back_kb())
+        await callback.answer()
+        return
+
+    try:
+        await send_email(pkg["to"], pkg["subject"], pkg["body"], attachment=pkg["pdf"], filename=pkg["filename"])
+    except Exception as exc:  # noqa: BLE001 — показываем реальную причину (проверка SMTP)
+        logger.exception("Ошибка отправки письма")
+        await edit_or_send(callback.message, f"❌ Не отправлено: {exc}", reply_markup=back_kb())
+        await callback.answer()
+        return
+    await edit_or_send(callback.message,
+        f"✅ Отправлено на {pkg['to']}\nТема: {pkg['subject']}", reply_markup=back_kb())
+    await callback.answer("Письмо отправлено")
 
 
 @router.callback_query(F.data == "adm:doc_upd")

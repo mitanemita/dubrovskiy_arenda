@@ -58,21 +58,69 @@ def _clip(text: str) -> str:
     return text[: _TG_MAX_LEN - 1] + "…"
 
 
+# Реестр «активного сообщения-панели» по чату. Позволяет мастерам жить в одном
+# сообщении: навигация и шаги ввода правят одну и ту же панель, а сообщения
+# пользователя удаляет FSMCleanupMiddleware. Хранится в памяти процесса.
+_PANELS: dict[int, int] = {}
+
+
+def _set_panel(message: Message) -> None:
+    try:
+        _PANELS[message.chat.id] = message.message_id
+    except Exception:
+        pass
+
+
 async def edit_or_send(message: Message, text: str, reply_markup=None) -> None:
     """Навигация без спама: правит текущее сообщение бота, иначе шлёт новое.
 
     Используется в callback-хендлерах, чтобы переход в другое меню заменял
     предыдущее сообщение, а не добавлял новое. Текст обрезается до лимита Telegram.
+    Отредактированное сообщение запоминается как «панель» чата.
     """
     text = _clip(text)
     try:
         await message.edit_text(text, reply_markup=reply_markup)
+        _set_panel(message)
+        return
     except TelegramBadRequest as exc:
         if "message is not modified" in str(exc):
+            _set_panel(message)
             return
-        await message.answer(text, reply_markup=reply_markup)
+        m = await message.answer(text, reply_markup=reply_markup)
+        _set_panel(m)
     except Exception:
-        await message.answer(text, reply_markup=reply_markup)
+        m = await message.answer(text, reply_markup=reply_markup)
+        _set_panel(m)
+
+
+async def send_panel(message: Message, text: str, reply_markup=None) -> Message:
+    """Отправляет новое сообщение и делает его «панелью» чата (точки входа: /start, /menu)."""
+    m = await message.answer(_clip(text), reply_markup=reply_markup)
+    _set_panel(m)
+    return m
+
+
+async def wiz_reply(message: Message, text: str, reply_markup=None) -> None:
+    """Ответ на ввод в мастере: правит панель чата, чтобы не плодить сообщения.
+
+    Само сообщение пользователя удаляет FSMCleanupMiddleware — так в чате остаётся
+    одно «живое» сообщение бота.
+    """
+    text = _clip(text)
+    chat_id = message.chat.id
+    pid = _PANELS.get(chat_id)
+    if pid:
+        try:
+            await message.bot.edit_message_text(text, chat_id=chat_id, message_id=pid, reply_markup=reply_markup)
+            return
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc):
+                return
+        except Exception:
+            pass
+    m = await message.answer(text, reply_markup=reply_markup)
+    _set_panel(m)
 
 
 # Настройки, доступные для правки через бота: ключ -> подпись
@@ -182,7 +230,7 @@ async def show_main_menu(message: Message, *, greet: bool = False, edit: bool = 
     if edit:
         await edit_or_send(message, text, reply_markup=main_menu_kb())
     else:
-        await message.answer(text, reply_markup=main_menu_kb())
+        await send_panel(message, text, reply_markup=main_menu_kb())
 
 
 @router.message(Command("menu"))
@@ -232,14 +280,14 @@ async def settings_save(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     key = data["setting_key"]
     if _parse_amount(message.text) is None:
-        await message.answer("❌ Введите число. Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Введите число. Повторите:", reply_markup=cancel_kb())
         return
     async with async_session_factory() as session:
         lid = await _landlord_id(session, message.from_user.id)
         await settings_service.set_setting(session, lid, key, message.text.replace(",", ".").strip())
         await session.commit()
     await state.clear()
-    await message.answer("✅ Значение сохранено.", reply_markup=main_menu_kb())
+    await wiz_reply(message, "✅ Значение сохранено.", reply_markup=main_menu_kb())
 
 
 # --- Расходы ---------------------------------------------------------------
@@ -296,7 +344,7 @@ async def expense_pick(callback: CallbackQuery, state: FSMContext) -> None:
 async def expense_save(message: Message, state: FSMContext) -> None:
     amount = _parse_amount(message.text)
     if amount is None or amount <= 0:
-        await message.answer("❌ Введите положительную сумму. Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Введите положительную сумму. Повторите:", reply_markup=cancel_kb())
         return
     data = await state.get_data()
     category = ExpenseCategory(data["expense_category"])
@@ -307,7 +355,7 @@ async def expense_save(message: Message, state: FSMContext) -> None:
         )
         await session.commit()
     await state.clear()
-    await message.answer(f"✅ Расход {amount} ₽ добавлен.", reply_markup=_expense_menu_kb())
+    await wiz_reply(message, f"✅ Расход {amount} ₽ добавлен.", reply_markup=_expense_menu_kb())
 
 
 # Список расходов месяца + правка суммы (с аудитом) — вместо общей «Корректировки»
@@ -391,11 +439,11 @@ async def charge_correct_start(callback: CallbackQuery, state: FSMContext) -> No
 async def adjust_amount(message: Message, state: FSMContext) -> None:
     amount = _parse_amount(message.text)
     if amount is None or amount < 0:
-        await message.answer("❌ Введите неотрицательную сумму. Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Введите неотрицательную сумму. Повторите:", reply_markup=cancel_kb())
         return
     await state.update_data(new_amount=str(amount))
     await state.set_state(AdjustFSM.reason)
-    await message.answer("Укажите причину корректировки:", reply_markup=cancel_kb())
+    await wiz_reply(message, "Укажите причину корректировки:", reply_markup=cancel_kb())
 
 
 @router.message(AdjustFSM.reason)
@@ -420,12 +468,12 @@ async def adjust_save(message: Message, state: FSMContext) -> None:
         except ValueError as exc:
             await session.rollback()
             await state.clear()
-            await message.answer(f"❌ {exc}", reply_markup=main_menu_kb())
+            await wiz_reply(message, f"❌ {exc}", reply_markup=main_menu_kb())
             return
     kind = data.get("entity_type")
     await state.clear()
     kb = _expense_menu_kb() if kind == "expense" else main_menu_kb()
-    await message.answer("✅ Сумма скорректирована (записано в аудит).", reply_markup=kb)
+    await wiz_reply(message, "✅ Сумма скорректирована (записано в аудит).", reply_markup=kb)
 
 
 # --- Показания счётчиков (ручной ввод / электричество) --------------------
@@ -492,17 +540,17 @@ async def reading_pick(callback: CallbackQuery, state: FSMContext) -> None:
 async def reading_save(message: Message, state: FSMContext) -> None:
     parts = message.text.split()
     if len(parts) != 2:
-        await message.answer("❌ Формат: ММ.ГГГГ значение. Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Формат: ММ.ГГГГ значение. Повторите:", reply_markup=cancel_kb())
         return
     try:
         month, year = parts[0].split(".")
         period = date(int(year), int(month), 1)
     except (ValueError, IndexError):
-        await message.answer("❌ Неверный период (ММ.ГГГГ). Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Неверный период (ММ.ГГГГ). Повторите:", reply_markup=cancel_kb())
         return
     curr = _parse_amount(parts[1])
     if curr is None or curr < 0:
-        await message.answer("❌ Неверное значение показаний. Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Неверное значение показаний. Повторите:", reply_markup=cancel_kb())
         return
 
     data = await state.get_data()
@@ -510,7 +558,7 @@ async def reading_save(message: Message, state: FSMContext) -> None:
         meter = await session.get(Meter, data["meter_id"])
         if meter is None:
             await state.clear()
-            await message.answer("❌ Счётчик не найден.", reply_markup=main_menu_kb())
+            await wiz_reply(message, "❌ Счётчик не найден.", reply_markup=main_menu_kb())
             return
         try:
             reading = await reading_service.upsert_reading(
@@ -520,10 +568,10 @@ async def reading_save(message: Message, state: FSMContext) -> None:
         except ValueError as exc:
             await session.rollback()
             await state.clear()
-            await message.answer(f"❌ {exc}", reply_markup=main_menu_kb())
+            await wiz_reply(message, f"❌ {exc}", reply_markup=main_menu_kb())
             return
     await state.clear()
-    await message.answer(
+    await wiz_reply(message, 
         f"✅ Показания сохранены. Расход: {reading.consumption} кВт·ч.", reply_markup=main_menu_kb()
     )
 
@@ -701,15 +749,15 @@ async def task_add_start(callback: CallbackQuery, state: FSMContext) -> None:
 async def task_add_title(message: Message, state: FSMContext) -> None:
     title = message.text.strip()
     if not title:
-        await message.answer("❌ Текст задачи не может быть пустым. Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Текст задачи не может быть пустым. Повторите:", reply_markup=cancel_kb())
         return
     await state.update_data(title=title)
     await state.set_state(TaskFSM.add_assignee)
-    await message.answer("Кому поставить задачу?", reply_markup=_assignee_kb("asg"))
+    await wiz_reply(message, "Кому поставить задачу?", reply_markup=_assignee_kb("asg"))
 
 
 async def _ask_priority(message: Message) -> None:
-    await message.answer(
+    await wiz_reply(message, 
         "Выберите приоритет (задаёт срок) или «На дату»:",
         reply_markup=_priority_kb("add", with_date=True),
     )
@@ -734,7 +782,7 @@ async def task_add_assignee(callback: CallbackQuery, state: FSMContext) -> None:
 async def task_add_assignee_text(message: Message, state: FSMContext) -> None:
     name = message.text.strip()
     if not name:
-        await message.answer("❌ Имя не может быть пустым. Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Имя не может быть пустым. Повторите:", reply_markup=cancel_kb())
         return
     await state.update_data(assignee=name)
     await state.set_state(TaskFSM.add_priority)
@@ -770,12 +818,12 @@ async def task_add_pick_date(callback: CallbackQuery, state: FSMContext) -> None
 async def task_add_date(message: Message, state: FSMContext) -> None:
     due = _parse_date(message.text)
     if due is None:
-        await message.answer("❌ Формат ДД.ММ.ГГГГ. Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Формат ДД.ММ.ГГГГ. Повторите:", reply_markup=cancel_kb())
         return
     due_str = await _create_task_and_reply(
         message, state, priority=task_service.TaskPriority.medium, due_date=due, user_tg_id=message.from_user.id
     )
-    await message.answer(f"✅ Задача добавлена на {due_str}.", reply_markup=main_menu_kb())
+    await wiz_reply(message, f"✅ Задача добавлена на {due_str}.", reply_markup=main_menu_kb())
 
 
 @router.callback_query(TaskFSM.add_priority, F.data.startswith("tp:add:"))
@@ -810,7 +858,7 @@ async def task_bulk_start(callback: CallbackQuery, state: FSMContext) -> None:
 async def task_bulk_save(message: Message, state: FSMContext) -> None:
     lines = [ln for ln in message.text.splitlines() if ln.strip()]
     if not lines:
-        await message.answer("❌ Пусто. Пришлите задачи по одной на строку:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Пусто. Пришлите задачи по одной на строку:", reply_markup=cancel_kb())
         return
     async with async_session_factory() as session:
         lid = await _landlord_id(session, message.from_user.id)
@@ -821,7 +869,7 @@ async def task_bulk_save(message: Message, state: FSMContext) -> None:
         )
         await session.commit()
     await state.clear()
-    await message.answer(f"✅ Добавлено задач: {len(created)}.", reply_markup=main_menu_kb())
+    await wiz_reply(message, f"✅ Добавлено задач: {len(created)}.", reply_markup=main_menu_kb())
 
 
 # Редактирование
@@ -845,7 +893,7 @@ async def task_edit_title(message: Message, state: FSMContext) -> None:
     text = message.text.strip()
     await state.update_data(new_title=None if text == "-" else text)
     await state.set_state(TaskFSM.edit_priority)
-    await message.answer(
+    await wiz_reply(message, 
         "Новый приоритет, дата или без изменений:",
         reply_markup=_priority_kb("edit", with_keep=True, with_date=True),
     )
@@ -901,7 +949,7 @@ async def task_edit_pick_date(callback: CallbackQuery, state: FSMContext) -> Non
 async def task_edit_date(message: Message, state: FSMContext) -> None:
     due = _parse_date(message.text)
     if due is None:
-        await message.answer("❌ Формат ДД.ММ.ГГГГ. Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Формат ДД.ММ.ГГГГ. Повторите:", reply_markup=cancel_kb())
         return
     data = await state.get_data()
     async with async_session_factory() as session:
@@ -910,7 +958,7 @@ async def task_edit_date(message: Message, state: FSMContext) -> None:
         await task_service.set_due_date(session, data["edit_id"], due)
         await session.commit()
     await state.clear()
-    await message.answer(f"✅ Задача перенесена на {due.strftime('%d.%m.%Y')}.", reply_markup=main_menu_kb())
+    await wiz_reply(message, f"✅ Задача перенесена на {due.strftime('%d.%m.%Y')}.", reply_markup=main_menu_kb())
 
 
 @router.callback_query(TaskFSM.edit_priority, F.data.startswith("tp:edit:"))
@@ -988,7 +1036,7 @@ async def task_edit_assignee_set(callback: CallbackQuery, state: FSMContext) -> 
 async def task_edit_assignee_text(message: Message, state: FSMContext) -> None:
     name = message.text.strip()
     if not name:
-        await message.answer("❌ Имя не может быть пустым. Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Имя не может быть пустым. Повторите:", reply_markup=cancel_kb())
         return
     data = await state.get_data()
     async with async_session_factory() as session:
@@ -1003,7 +1051,7 @@ async def _open_task_card(message: Message, task_id: int) -> None:
     async with async_session_factory() as session:
         t = await task_service.get_task(session, task_id)
     if t is None:
-        await message.answer("Задача не найдена.", reply_markup=main_menu_kb())
+        await wiz_reply(message, "Задача не найдена.", reply_markup=main_menu_kb())
         return
     due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
     text = (
@@ -1018,7 +1066,7 @@ async def _open_task_card(message: Message, task_id: int) -> None:
         [InlineKeyboardButton(text="👤 Адресат", callback_data=f"taskasg:{t.id}")],
         [InlineKeyboardButton(text="◀️ К списку", callback_data="tasks:edit")],
     ])
-    await edit_or_send(message, text, reply_markup=kb)
+    await wiz_reply(message, text, reply_markup=kb)
 
 
 # --- Выполненные задачи ----------------------------------------------------
@@ -1153,7 +1201,7 @@ async def _finish_charge_payment(message: Message, tg_id: int, state: FSMContext
         charge = await session.get(Charge, charge_id)
         if charge is None:
             await state.clear()
-            await message.answer("❌ Начисление не найдено.", reply_markup=main_menu_kb())
+            await wiz_reply(message, "❌ Начисление не найдено.", reply_markup=main_menu_kb())
             return
         label = _CHARGE_TYPE_LABEL.get(charge.type, charge.type.value)
         result = await payment_service.pay_charge(
@@ -1162,7 +1210,7 @@ async def _finish_charge_payment(message: Message, tg_id: int, state: FSMContext
         await session.commit()
     await state.clear()
     note = "закрыто полностью" if result["fully_paid"] else f"остаток {result['remaining']} ₽"
-    await message.answer(f"✅ Оплата «{label}» {result['allocated']} ₽ отмечена ({note}).", reply_markup=main_menu_kb())
+    await wiz_reply(message, f"✅ Оплата «{label}» {result['allocated']} ₽ отмечена ({note}).", reply_markup=main_menu_kb())
 
 
 @router.callback_query(F.data.startswith("payfull:"))
@@ -1182,7 +1230,7 @@ async def payment_charge_full(callback: CallbackQuery, state: FSMContext) -> Non
 async def payment_manual_save(message: Message, state: FSMContext) -> None:
     amount = _parse_amount(message.text)
     if amount is None or amount <= 0:
-        await message.answer("❌ Введите положительную сумму. Повторите:", reply_markup=cancel_kb())
+        await wiz_reply(message, "❌ Введите положительную сумму. Повторите:", reply_markup=cancel_kb())
         return
     data = await state.get_data()
     if data.get("pay_mode") == "charge":
@@ -1204,7 +1252,7 @@ async def payment_manual_save(message: Message, state: FSMContext) -> None:
         note = "начисления закрыты полностью"
     else:
         note = f"частично, остаток {result.get('remaining_debt')} ₽"
-    await message.answer(f"✅ Оплата {amount} ₽ отмечена ({note}). Арендатор уведомлён.", reply_markup=main_menu_kb())
+    await wiz_reply(message, f"✅ Оплата {amount} ₽ отмечена ({note}). Арендатор уведомлён.", reply_markup=main_menu_kb())
 
 
 # --- Отчёты ----------------------------------------------------------------

@@ -17,7 +17,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from app.bot.handlers_admin import _landlord_id, _parse_amount, _parse_date, edit_or_send
+from app.bot.handlers_admin import _landlord_id, _parse_amount, _parse_date, edit_or_send, wiz_reply
 from app.db.base import async_session_factory
 from app.db.enums import OrgType
 from app.db.models import Lease, Premises, Tenant
@@ -199,7 +199,7 @@ async def _render_premises_card(message, pid: int) -> bool:
          InlineKeyboardButton(text="🗑 Удалить", callback_data=f"pdel:{p.id}")],
         [InlineKeyboardButton(text="◀️ К помещениям", callback_data="dir:premises")],
     ])
-    await edit_or_send(message, text, reply_markup=kb)
+    await wiz_reply(message, text, reply_markup=kb)
     return True
 
 
@@ -277,11 +277,11 @@ async def premises_add(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(PremisesFSM.label)
 async def premises_label(message: Message, state: FSMContext) -> None:
     if not message.text.strip():
-        await message.answer("❌ Название не может быть пустым. Повторите:", reply_markup=_io_kb())
+        await wiz_reply(message, "❌ Название не может быть пустым. Повторите:", reply_markup=_io_kb())
         return
     await state.update_data(label=message.text.strip())
     await state.set_state(PremisesFSM.address)
-    await message.answer("Адрес помещения (или пропустите):", reply_markup=_io_kb("dsk:prem_addr"))
+    await wiz_reply(message, "Адрес помещения (или пропустите):", reply_markup=_io_kb("dsk:prem_addr"))
 
 
 @router.callback_query(PremisesFSM.address, F.data == "dsk:prem_addr")
@@ -296,7 +296,7 @@ async def premises_skip_addr(callback: CallbackQuery, state: FSMContext) -> None
 async def premises_address(message: Message, state: FSMContext) -> None:
     await state.update_data(address=message.text.strip())
     await state.set_state(PremisesFSM.area)
-    await message.answer("Площадь, м² (или пропустите):", reply_markup=_io_kb("dsk:prem_area"))
+    await wiz_reply(message, "Площадь, м² (или пропустите):", reply_markup=_io_kb("dsk:prem_area"))
 
 
 @router.callback_query(PremisesFSM.area, F.data == "dsk:prem_area")
@@ -309,7 +309,7 @@ async def premises_skip_area(callback: CallbackQuery, state: FSMContext) -> None
 async def premises_area(message: Message, state: FSMContext) -> None:
     area = _parse_amount(message.text)
     if area is None or area <= 0:
-        await message.answer("❌ Введите положительное число или пропустите:", reply_markup=_io_kb("dsk:prem_area"))
+        await wiz_reply(message, "❌ Введите положительное число или пропустите:", reply_markup=_io_kb("dsk:prem_area"))
         return
     await _premises_finish(message, message.from_user.id, state, area=area)
 
@@ -330,10 +330,10 @@ async def _premises_finish(message: Message, tg_id: int, state: FSMContext, *, a
         except ValueError as exc:
             await session.rollback()
             await state.clear()
-            await message.answer(f"❌ {exc}", reply_markup=main_menu_kb())
+            await wiz_reply(message, f"❌ {exc}", reply_markup=main_menu_kb())
             return
     await state.clear()
-    await message.answer(f"✅ Помещение «{label}» добавлено (🟢 свободно).", reply_markup=_list_kb("dadd:premises"))
+    await wiz_reply(message, f"✅ Помещение «{label}» добавлено (🟢 свободно).", reply_markup=_list_kb("dadd:premises"))
 
 
 # --- Арендаторы ------------------------------------------------------------
@@ -372,7 +372,7 @@ async def _render_tenant_card(message, tid: int) -> bool:
             for field, title in directory_service.TENANT_FIELDS.items()]
     rows.append([InlineKeyboardButton(text="🗑 Удалить арендатора", callback_data=f"tndel:{tid}")])
     rows.append([InlineKeyboardButton(text="◀️ К арендаторам", callback_data="dir:tenants")])
-    await edit_or_send(message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await wiz_reply(message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     return True
 
 
@@ -437,7 +437,7 @@ async def tenant_add(callback: CallbackQuery, state: FSMContext) -> None:
 @router.message(TenantFSM.name)
 async def tenant_name(message: Message, state: FSMContext) -> None:
     if not message.text.strip():
-        await message.answer("❌ Наименование не может быть пустым. Повторите:", reply_markup=_io_kb())
+        await wiz_reply(message, "❌ Наименование не может быть пустым. Повторите:", reply_markup=_io_kb())
         return
     await state.update_data(name=message.text.strip())
     await state.set_state(TenantFSM.org_type)
@@ -447,7 +447,7 @@ async def tenant_name(message: Message, state: FSMContext) -> None:
          InlineKeyboardButton(text="Физлицо", callback_data="dt:fiz")],
         [InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")],
     ])
-    await message.answer("Тип арендатора:", reply_markup=kb)
+    await wiz_reply(message, "Тип арендатора:", reply_markup=kb)
 
 
 @router.callback_query(TenantFSM.org_type, F.data.startswith("dt:"))
@@ -462,11 +462,11 @@ async def tenant_type(callback: CallbackQuery, state: FSMContext) -> None:
 async def tenant_inn(message: Message, state: FSMContext) -> None:
     inn = message.text.strip()
     if not inn.isdigit() or len(inn) not in (10, 12):
-        await message.answer("❌ ИНН — 10 или 12 цифр. Повторите:", reply_markup=_io_kb())
+        await wiz_reply(message, "❌ ИНН — 10 или 12 цифр. Повторите:", reply_markup=_io_kb())
         return
     await state.update_data(inn=inn)
     await state.set_state(TenantFSM.kpp)
-    await message.answer(
+    await wiz_reply(message, 
         "КПП (9 цифр, обычно у ООО; для ИП/физлица — пропустите):",
         reply_markup=_io_kb("dsk:ten_kpp"),
     )
@@ -486,11 +486,11 @@ async def tenant_skip_kpp(callback: CallbackQuery, state: FSMContext) -> None:
 async def tenant_kpp(message: Message, state: FSMContext) -> None:
     kpp = message.text.strip()
     if not kpp.isdigit() or len(kpp) != 9:
-        await message.answer("❌ КПП — 9 цифр. Повторите или пропустите:", reply_markup=_io_kb("dsk:ten_kpp"))
+        await wiz_reply(message, "❌ КПП — 9 цифр. Повторите или пропустите:", reply_markup=_io_kb("dsk:ten_kpp"))
         return
     await state.update_data(kpp=kpp)
     await state.set_state(TenantFSM.address)
-    await message.answer("Адрес арендатора (нужен для УПД) или пропустите:", reply_markup=_io_kb("dsk:ten_addr"))
+    await wiz_reply(message, "Адрес арендатора (нужен для УПД) или пропустите:", reply_markup=_io_kb("dsk:ten_addr"))
 
 
 @router.callback_query(TenantFSM.address, F.data == "dsk:ten_addr")
@@ -507,7 +507,7 @@ async def tenant_skip_addr(callback: CallbackQuery, state: FSMContext) -> None:
 async def tenant_address(message: Message, state: FSMContext) -> None:
     await state.update_data(address=message.text.strip())
     await state.set_state(TenantFSM.email)
-    await message.answer("Email арендатора (для отправки документов) или пропустите:", reply_markup=_io_kb("dsk:ten_email"))
+    await wiz_reply(message, "Email арендатора (для отправки документов) или пропустите:", reply_markup=_io_kb("dsk:ten_email"))
 
 
 @router.callback_query(TenantFSM.email, F.data == "dsk:ten_email")
@@ -522,7 +522,7 @@ async def tenant_skip_email(callback: CallbackQuery, state: FSMContext) -> None:
 async def tenant_email(message: Message, state: FSMContext) -> None:
     await state.update_data(email=message.text.strip())
     await state.set_state(TenantFSM.phone)
-    await message.answer("Телефон арендатора или пропустите:", reply_markup=_io_kb("dsk:ten_phone"))
+    await wiz_reply(message, "Телефон арендатора или пропустите:", reply_markup=_io_kb("dsk:ten_phone"))
 
 
 @router.callback_query(TenantFSM.phone, F.data == "dsk:ten_phone")
@@ -558,10 +558,10 @@ async def _tenant_finish(message: Message, tg_id: int, state: FSMContext, *, pho
         except ValueError as exc:
             await session.rollback()
             await state.clear()
-            await message.answer(f"❌ {exc}", reply_markup=main_menu_kb())
+            await wiz_reply(message, f"❌ {exc}", reply_markup=main_menu_kb())
             return
     await state.clear()
-    await message.answer(f"✅ Арендатор #{tid} «{data['name']}» добавлен.", reply_markup=_list_kb("dadd:tenants"))
+    await wiz_reply(message, f"✅ Арендатор #{tid} «{data['name']}» добавлен.", reply_markup=_list_kb("dadd:tenants"))
 
 
 # --- Договоры --------------------------------------------------------------
@@ -608,7 +608,7 @@ async def _render_lease_card(message, lease_id: int) -> bool:
         [InlineKeyboardButton(text="🗑 Удалить договор", callback_data=f"ldel:{lease_id}")],
         [InlineKeyboardButton(text="◀️ К договорам", callback_data="dir:leases")],
     ])
-    await edit_or_send(message, text, reply_markup=kb)
+    await wiz_reply(message, text, reply_markup=kb)
     return True
 
 
@@ -709,7 +709,7 @@ async def edit_value_save(message: Message, state: FSMContext) -> None:
             if kind == "lease_rent":
                 amount = _parse_amount(raw)
                 if amount is None or amount <= 0:
-                    await message.answer("❌ Введите положительную сумму. Повторите:", reply_markup=cancel_kb())
+                    await wiz_reply(message, "❌ Введите положительную сумму. Повторите:", reply_markup=cancel_kb())
                     return
                 await directory_service.update_lease(session, eid, rent_amount=amount)
                 await session.commit()
@@ -718,7 +718,7 @@ async def edit_value_save(message: Message, state: FSMContext) -> None:
                 return
             if kind == "lease_day":
                 if not raw.isdigit() or not 1 <= int(raw) <= 31:
-                    await message.answer("❌ День оплаты — число 1..31. Повторите:", reply_markup=cancel_kb())
+                    await wiz_reply(message, "❌ День оплаты — число 1..31. Повторите:", reply_markup=cancel_kb())
                     return
                 await directory_service.update_lease(session, eid, payment_day=int(raw))
                 await session.commit()
@@ -727,10 +727,10 @@ async def edit_value_save(message: Message, state: FSMContext) -> None:
                 return
         except ValueError as exc:
             await session.rollback()
-            await message.answer(f"❌ {exc}\nПовторите ввод:", reply_markup=cancel_kb())
+            await wiz_reply(message, f"❌ {exc}\nПовторите ввод:", reply_markup=cancel_kb())
             return
     await state.clear()
-    await message.answer("Готово.", reply_markup=main_menu_kb())
+    await wiz_reply(message, "Готово.", reply_markup=main_menu_kb())
 
 
 @router.callback_query(F.data == "dadd:leases")
@@ -783,33 +783,33 @@ async def lease_pick_premises(callback: CallbackQuery, state: FSMContext) -> Non
 @router.message(LeaseFSM.contract_no)
 async def lease_contract_no(message: Message, state: FSMContext) -> None:
     if not message.text.strip():
-        await message.answer("❌ Номер договора не может быть пустым. Повторите:", reply_markup=_io_kb())
+        await wiz_reply(message, "❌ Номер договора не может быть пустым. Повторите:", reply_markup=_io_kb())
         return
     await state.update_data(contract_no=message.text.strip())
     await state.set_state(LeaseFSM.contract_date)
-    await message.answer("Дата договора ДД.ММ.ГГГГ:", reply_markup=_io_kb())
+    await wiz_reply(message, "Дата договора ДД.ММ.ГГГГ:", reply_markup=_io_kb())
 
 
 @router.message(LeaseFSM.contract_date)
 async def lease_contract_date(message: Message, state: FSMContext) -> None:
     d = _parse_date(message.text)
     if d is None:
-        await message.answer("❌ Формат ДД.ММ.ГГГГ. Повторите:", reply_markup=_io_kb())
+        await wiz_reply(message, "❌ Формат ДД.ММ.ГГГГ. Повторите:", reply_markup=_io_kb())
         return
     await state.update_data(contract_date=d.isoformat())
     await state.set_state(LeaseFSM.rent)
-    await message.answer("Сумма аренды в месяц, ₽:", reply_markup=_io_kb())
+    await wiz_reply(message, "Сумма аренды в месяц, ₽:", reply_markup=_io_kb())
 
 
 @router.message(LeaseFSM.rent)
 async def lease_rent(message: Message, state: FSMContext) -> None:
     rent = _parse_amount(message.text)
     if rent is None or rent <= 0:
-        await message.answer("❌ Введите положительную сумму. Повторите:", reply_markup=_io_kb())
+        await wiz_reply(message, "❌ Введите положительную сумму. Повторите:", reply_markup=_io_kb())
         return
     await state.update_data(rent=str(rent))
     await state.set_state(LeaseFSM.payment_day)
-    await message.answer(
+    await wiz_reply(message, 
         "День оплаты (1..31) или пропустите (по умолчанию 5):",
         reply_markup=_io_kb("dsk:lease_payday"),
     )
@@ -825,7 +825,7 @@ async def lease_skip_payday(callback: CallbackQuery, state: FSMContext) -> None:
 async def lease_payment_day(message: Message, state: FSMContext) -> None:
     raw = message.text.strip()
     if not raw.isdigit() or not 1 <= int(raw) <= 31:
-        await message.answer("❌ День оплаты — число 1..31. Повторите или пропустите:", reply_markup=_io_kb("dsk:lease_payday"))
+        await wiz_reply(message, "❌ День оплаты — число 1..31. Повторите или пропустите:", reply_markup=_io_kb("dsk:lease_payday"))
         return
     await _lease_finish(message, message.from_user.id, state, payment_day=int(raw))
 
@@ -855,10 +855,10 @@ async def _lease_finish(message: Message, tg_id: int, state: FSMContext, *, paym
         except ValueError as exc:
             await session.rollback()
             await state.clear()
-            await message.answer(f"❌ {exc}", reply_markup=main_menu_kb())
+            await wiz_reply(message, f"❌ {exc}", reply_markup=main_menu_kb())
             return
     await state.clear()
-    await message.answer(
+    await wiz_reply(message, 
         f"✅ Договор №{data['contract_no']} создан (день оплаты {payment_day}). Аренда за текущий месяц начислена.",
         reply_markup=_list_kb("dadd:leases"),
     )
@@ -971,7 +971,7 @@ async def meter_skip_serial(callback: CallbackQuery, state: FSMContext) -> None:
 async def meter_serial(message: Message, state: FSMContext) -> None:
     await state.update_data(serial=message.text.strip())
     await state.set_state(MeterFSM.label)
-    await message.answer("Метка/название счётчика или пропустите:", reply_markup=_io_kb("dsk:meter_label"))
+    await wiz_reply(message, "Метка/название счётчика или пропустите:", reply_markup=_io_kb("dsk:meter_label"))
 
 
 @router.callback_query(MeterFSM.label, F.data == "dsk:meter_label")
@@ -986,7 +986,7 @@ async def meter_skip_label(callback: CallbackQuery, state: FSMContext) -> None:
 async def meter_label(message: Message, state: FSMContext) -> None:
     await state.update_data(label=message.text.strip())
     await state.set_state(MeterFSM.coefficient)
-    await message.answer("Коэффициент (напр. 0.93) или пропустите:", reply_markup=_io_kb("dsk:meter_coeff"))
+    await wiz_reply(message, "Коэффициент (напр. 0.93) или пропустите:", reply_markup=_io_kb("dsk:meter_coeff"))
 
 
 @router.callback_query(MeterFSM.coefficient, F.data == "dsk:meter_coeff")
@@ -999,7 +999,7 @@ async def meter_skip_coeff(callback: CallbackQuery, state: FSMContext) -> None:
 async def meter_coefficient(message: Message, state: FSMContext) -> None:
     coeff = _parse_amount(message.text)
     if coeff is None or coeff <= 0:
-        await message.answer("❌ Введите положительное число или пропустите:", reply_markup=_io_kb("dsk:meter_coeff"))
+        await wiz_reply(message, "❌ Введите положительное число или пропустите:", reply_markup=_io_kb("dsk:meter_coeff"))
         return
     await _meter_finish(message, message.from_user.id, state, coefficient=coeff)
 
@@ -1021,10 +1021,10 @@ async def _meter_finish(message: Message, tg_id: int, state: FSMContext, *, coef
         except ValueError as exc:
             await session.rollback()
             await state.clear()
-            await message.answer(f"❌ {exc}", reply_markup=main_menu_kb())
+            await wiz_reply(message, f"❌ {exc}", reply_markup=main_menu_kb())
             return
     await state.clear()
-    await message.answer(f"✅ Счётчик #{meter_id} добавлен.", reply_markup=_list_kb("dadd:meters"))
+    await wiz_reply(message, f"✅ Счётчик #{meter_id} добавлен.", reply_markup=_list_kb("dadd:meters"))
 
 
 # --- Реквизиты арендодателя ------------------------------------------------
@@ -1086,7 +1086,7 @@ async def landlord_field_save(message: Message, state: FSMContext) -> None:
             view = _landlord_view(landlord)
         except ValueError as exc:
             await session.rollback()
-            await message.answer(f"❌ {exc}\nПовторите ввод:", reply_markup=_io_kb())
+            await wiz_reply(message, f"❌ {exc}\nПовторите ввод:", reply_markup=_io_kb())
             return
     await state.clear()
-    await message.answer("✅ Сохранено.\n\n" + view, reply_markup=_landlord_kb())
+    await wiz_reply(message, "✅ Сохранено.\n\n" + view, reply_markup=_landlord_kb())
