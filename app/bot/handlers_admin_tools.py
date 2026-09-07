@@ -24,7 +24,7 @@ from app.bot.keyboards import back_kb, main_menu_kb
 from app.db.enums import ChargeType, LeaseStatus
 from app.db.base import async_session_factory
 from app.db.models import Lease, Tenant
-from app.email.sender import send_email, smtp_check
+from app.email.sender import send_email, email_check
 from app.services import admin_service, document_service
 from app.services.billing_service import period_start
 from app.utils.logger import logger
@@ -38,7 +38,7 @@ def _admin_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🗑 Очистить все данные", callback_data="adm:wipe_confirm")],
         [InlineKeyboardButton(text="📧 УПД на почту", callback_data="adm:doc_upd"),
          InlineKeyboardButton(text="📧 Квитанция на почту", callback_data="adm:doc_receipt")],
-        [InlineKeyboardButton(text="🔌 Тест SMTP (без отправки)", callback_data="adm:smtp")],
+        [InlineKeyboardButton(text="🔌 Тест почты (без отправки)", callback_data="adm:smtp")],
         [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
     ])
 
@@ -192,14 +192,14 @@ async def admin_smtp_test(callback: CallbackQuery, state: FSMContext) -> None:
     """Проверка доступности SMTP и логина без отправки письма."""
     await state.clear()
     await callback.answer("Проверяю…")
-    await edit_or_send(callback.message, "⏳ Проверяю подключение к SMTP…")
+    await edit_or_send(callback.message, "⏳ Проверяю почтовый транспорт…")
     try:
-        info = await smtp_check()
+        info = await email_check()
     except Exception as exc:  # noqa: BLE001 — показываем реальную причину
         logger.exception("Ошибка проверки SMTP")
         await edit_or_send(
             callback.message,
-            f"❌ SMTP недоступен:\n{exc}\n\n"
+            f"❌ Почта недоступна:\n{exc}\n\n"
             "Частая причина — провайдер/фаервол блокирует исходящий SMTP. "
             "Попробуйте SMTP_PORT=587 в .env; если и он закрыт — используйте "
             "почтовый релей/API или отправку через n8n.",

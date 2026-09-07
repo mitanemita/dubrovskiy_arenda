@@ -87,6 +87,11 @@ paid_amount, status) + `payments` + `payment_allocations` (разнос плат
 Связи: charge→lease→(tenant, premises)→landlord; expense→landlord. Периоды
 нормализованы к 1-му числу месяца (см. `billing_service.period_start`).
 
+Отправка почты (`app/email/sender.py`): транспорт по `EMAIL_PROVIDER` —
+`smtp` (IPv4-форс) или HTTPS-API `brevo|sendgrid|resend` (`EMAIL_API_KEY`+
+`EMAIL_FROM`). Нужно потому, что хостер блокирует исходящий SMTP (443 открыт).
+Проверка транспорта — `email_check()` и кнопка «🔌 Тест почты» в /admin.
+
 ## Что сделано в последних итерациях
 Инлайн-меню, авто-инициализация, справочники с CRUD, авто-занятость, отчёты
 (сводка/должники/по месяцам), задачи (адресат Митя/Алексей/текст/общая,

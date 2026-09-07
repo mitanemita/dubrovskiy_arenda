@@ -30,11 +30,21 @@ class Settings(BaseSettings):
     db_password: str = Field(default="", alias="DB_PASSWORD")
     db_name: str = Field(default="arenda", alias="DB_NAME")
 
-    # --- Почта (SMTP для отправки, IMAP при необходимости приёма) ---
+    # --- Почта ---
+    # Транспорт: smtp (по умолчанию) или HTTPS-API (brevo/sendgrid/resend) на 443,
+    # если провайдер блокирует исходящий SMTP.
+    email_provider: str = Field(default="smtp", alias="EMAIL_PROVIDER")
+    email_api_key: str = Field(default="", alias="EMAIL_API_KEY")
+    email_from: str = Field(default="", alias="EMAIL_FROM")  # адрес отправителя (для API); если пусто — email_login
     smtp_server: str = Field(default="smtp.gmail.com", alias="SMTP_SERVER")
     smtp_port: int = Field(default=465, alias="SMTP_PORT")
     email_login: str = Field(default="", alias="EMAIL_LOGIN")
     email_password: str = Field(default="", alias="EMAIL_PASSWORD")
+
+    @property
+    def sender_email(self) -> str:
+        """Адрес отправителя для писем (API/SMTP)."""
+        return self.email_from or self.email_login
 
     # --- Вебхуки n8n (общий секрет для авторизации входящих запросов) ---
     webhook_token: str = Field(default="", alias="WEBHOOK_TOKEN")
