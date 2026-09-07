@@ -5,10 +5,11 @@ from datetime import date
 
 from aiogram import F, Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 
-from app.bot.handlers_admin import main_menu
+from app.bot.handlers_admin import show_main_menu
 from app.bot.keyboards import CB_PAY
 from app.config import get_settings
 from app.db.base import async_session_factory
@@ -30,17 +31,14 @@ async def _is_allowed(session, tg_id: int) -> bool:
 
 
 @router.message(Command("start"))
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
     async with async_session_factory() as session:
         allowed = await _is_allowed(session, message.from_user.id)
     if not allowed:
         await message.answer("⛔ Доступ запрещён. Обратитесь к администратору.")
         return
-    await message.answer(
-        "👋 Бот учёта аренды.\n"
-        "Сюда приходят платежи на подтверждение и уведомления о нехватке данных.",
-        reply_markup=main_menu(),
-    )
+    await show_main_menu(message, greet=True)
 
 
 @router.callback_query(F.data.startswith(f"{CB_PAY}:"))

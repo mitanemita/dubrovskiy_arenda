@@ -49,6 +49,15 @@ async def _dispatch_loop(bot: Bot) -> None:
 
 async def run() -> None:
     """Точка входа бота (polling + фоновая доставка)."""
+    # Идемпотентная первичная инициализация: арендодатель + владельцы + настройки.
+    # Гарантирует, что разделы бота не падают с «Нет арендодателя» на чистой БД.
+    try:
+        from app.scripts.bootstrap import bootstrap
+
+        await bootstrap()
+    except Exception:
+        logger.exception("Не удалось выполнить первичную инициализацию (bootstrap)")
+
     bot = build_bot()
     dp = Dispatcher()
     dp.include_router(router)
