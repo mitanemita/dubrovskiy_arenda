@@ -10,10 +10,10 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.enums import LeaseStatus, OrgType
+from app.db.enums import DataSource, LeaseStatus, OrgType
 from app.db.models import (
     Adjustment,
     Charge,
@@ -30,6 +30,7 @@ from app.db.models import (
     Task,
     Tenant,
 )
+from app.services import billing_service, payment_service, reading_service, settings_service
 
 
 async def wipe_business_data(session: AsyncSession, landlord_id: int) -> dict[str, int]:
@@ -78,13 +79,27 @@ async def wipe_business_data(session: AsyncSession, landlord_id: int) -> dict[st
     return {k: v for k, v in counts.items() if v}
 
 
-async def seed_test_data(session: AsyncSession, landlord_id: int) -> dict[str, int]:
-    """Создаёт демо-набор: помещения, арендаторы, договоры, счётчики, задачи.
+async def _lease_total(session: AsyncSession, lease_id: int, period: date) -> Decimal:
+    """Сумма начислений договора за период (для тестового платежа)."""
+    total = (await session.execute(
+        select(func.coalesce(func.sum(Charge.amount), 0)).where(
+            Charge.lease_id == lease_id, Charge.period == period
+        )
+    )).scalar_one()
+    return Decimal(str(total))
 
-    Предварительно очищает существующие бизнес-данные, чтобы не плодить дубли.
+
+async def seed_test_data(session: AsyncSession, landlord_id: int) -> dict[str, int]:
+    """Создаёт полный согласованный демо-набор за текущий месяц.
+
+    Помещения (в т.ч. свободное), арендаторы, договоры, счётчики, показания,
+    начисления (аренда+электричество) и платежи (один полный — подтверждён,
+    один частичный) — чтобы отчёты «Платежи по помещениям» и «Электричество»
+    показывали данные. Предварительно очищает бизнес-данные, чтобы не плодить дубли.
     Также заполняет реквизиты арендодателя-заглушки, если они пустые (для документов).
     """
     await wipe_business_data(session, landlord_id)
+    await settings_service.ensure_defaults(session, landlord_id)
 
     landlord = await session.get(Landlord, landlord_id)
     if landlord is not None:
@@ -96,12 +111,15 @@ async def seed_test_data(session: AsyncSession, landlord_id: int) -> dict[str, i
         landlord.corr_account = landlord.corr_account or "30101810400000000225"
 
     today = date.today()
+    period = billing_service.period_start(today)
 
     prem_a = Premises(landlord_id=landlord_id, label="Помещение А1", address="г. Тула, ул. Демонстрационная, 1",
                       area=Decimal("120.00"), is_occupied=True)
-    prem_b = Premises(landlord_id=landlord_id, label="Помещение Б2 (свободно)", address="г. Тула, ул. Демонстрационная, 3",
-                      area=Decimal("55.50"), is_occupied=False)
-    session.add_all([prem_a, prem_b])
+    prem_b = Premises(landlord_id=landlord_id, label="Помещение Б2", address="г. Тула, ул. Демонстрационная, 3",
+                      area=Decimal("55.50"), is_occupied=True)
+    prem_c = Premises(landlord_id=landlord_id, label="Помещение В3 (свободно)", address="г. Тула, ул. Демонстрационная, 5",
+                      area=Decimal("30.00"), is_occupied=False)
+    session.add_all([prem_a, prem_b, prem_c])
     await session.flush()
 
     tenant1 = Tenant(landlord_id=landlord_id, name="ООО «Ромашка»", type=OrgType.ooo, inn="7100000001",
@@ -114,14 +132,41 @@ async def seed_test_data(session: AsyncSession, landlord_id: int) -> dict[str, i
     lease1 = Lease(tenant_id=tenant1.id, premises_id=prem_a.id, contract_no="17/2026-АР",
                    contract_date=today - timedelta(days=90), rent_amount=Decimal("50000.00"),
                    payment_day=5, status=LeaseStatus.active)
-    lease2 = Lease(tenant_id=tenant2.id, premises_id=prem_a.id, contract_no="18/2026-АР",
+    lease2 = Lease(tenant_id=tenant2.id, premises_id=prem_b.id, contract_no="18/2026-АР",
                    contract_date=today - timedelta(days=30), rent_amount=Decimal("15000.00"),
                    payment_day=10, status=LeaseStatus.active)
     session.add_all([lease1, lease2])
     await session.flush()
 
-    meter = Meter(premises_id=prem_a.id, serial_no="М-1001", label="Основной", coefficient=Decimal("1.0"))
-    session.add(meter)
+    meter_a = Meter(premises_id=prem_a.id, serial_no="М-1001", label="Основной", coefficient=Decimal("1.0"))
+    meter_b = Meter(premises_id=prem_b.id, serial_no="М-2002", label="Основной", coefficient=None)
+    session.add_all([meter_a, meter_b])
+    await session.flush()
+
+    # Показания за текущий месяц (расход A=350, B=120 кВт·ч)
+    await reading_service.upsert_reading(session, meter_a, period=period,
+                                         curr_value=Decimal("15350"), prev_value=Decimal("15000"), source=DataSource.manual)
+    await reading_service.upsert_reading(session, meter_b, period=period,
+                                         curr_value=Decimal("8120"), prev_value=Decimal("8000"), source=DataSource.manual)
+    # Показания должны быть в БД до расчёта электричества (движок с autoflush=False).
+    await session.flush()
+
+    # Начисления за текущий месяц: аренда + электричество
+    for lease in (lease1, lease2):
+        await billing_service.create_rent_charge(session, lease, period)
+        await billing_service.create_electricity_charge(session, lease, period)
+    await session.flush()
+
+    # Платёж №1 — полный (договор 1): станет «подтверждён»
+    total1 = await _lease_total(session, lease1.id, period)
+    pay1 = await payment_service.register_payment(session, lease1.id, total1, period=period, payment_date=today)
+    await session.flush()
+    await payment_service.confirm_payment(session, pay1, confirmed_by_id=None, today=today)
+
+    # Платёж №2 — частичный (договор 2): только аренда, электричество остаётся долгом
+    pay2 = await payment_service.register_payment(session, lease2.id, Decimal("15000.00"), period=period, payment_date=today)
+    await session.flush()
+    await payment_service.confirm_payment(session, pay2, confirmed_by_id=None, today=today)
 
     tasks = [
         Task(landlord_id=landlord_id, title="Демо: проверить показания счётчика", due_date=today + timedelta(days=3)),
@@ -131,4 +176,5 @@ async def seed_test_data(session: AsyncSession, landlord_id: int) -> dict[str, i
     session.add_all(tasks)
     await session.flush()
 
-    return {"premises": 2, "tenants": 2, "leases": 2, "meters": 1, "tasks": len(tasks)}
+    return {"premises": 3, "tenants": 2, "leases": 2, "meters": 2, "readings": 2,
+            "charges": 4, "payments": 2, "tasks": len(tasks)}
