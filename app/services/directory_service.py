@@ -12,7 +12,20 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.enums import LeaseStatus, OrgType
-from app.db.models import Lease, Meter, Premises, Tenant
+from app.db.models import Landlord, Lease, Meter, Premises, Tenant
+
+# Реквизиты арендодателя, правимые через бота: поле -> (подпись, тип валидации)
+LANDLORD_FIELDS: dict[str, str] = {
+    "name": "Наименование",
+    "inn": "ИНН",
+    "kpp": "КПП",
+    "ogrn": "ОГРН/ОГРНИП",
+    "address": "Адрес",
+    "bank_name": "Банк",
+    "bik": "БИК",
+    "account": "Расчётный счёт",
+    "corr_account": "Корр. счёт",
+}
 
 
 def _clean_inn(inn: str) -> str:
@@ -23,6 +36,33 @@ def _clean_inn(inn: str) -> str:
     return digits
 
 
+# --- Реквизиты арендодателя ------------------------------------------------
+async def get_landlord(session: AsyncSession, landlord_id: int) -> Landlord | None:
+    return await session.get(Landlord, landlord_id)
+
+
+async def update_landlord_field(session: AsyncSession, landlord_id: int, field: str, value: str) -> Landlord:
+    """Обновляет одно поле реквизитов арендодателя (с валидацией по полю)."""
+    if field not in LANDLORD_FIELDS:
+        raise ValueError(f"Недопустимое поле: {field}")
+    value = value.strip()
+    if field in ("name",) and not value:
+        raise ValueError("Наименование не может быть пустым.")
+    if field == "inn":
+        value = _clean_inn(value)
+    if field == "kpp" and value and (not value.isdigit() or len(value) != 9):
+        raise ValueError("КПП должен состоять из 9 цифр.")
+    if field == "bik" and value and (not value.isdigit() or len(value) != 9):
+        raise ValueError("БИК должен состоять из 9 цифр.")
+    if field in ("account", "corr_account") and value and (not value.isdigit() or len(value) != 20):
+        raise ValueError("Номер счёта должен состоять из 20 цифр.")
+    landlord = await session.get(Landlord, landlord_id)
+    if landlord is None:
+        raise ValueError("Арендодатель не найден.")
+    setattr(landlord, field, value or None)
+    return landlord
+
+
 # --- Помещения -------------------------------------------------------------
 async def create_premises(
     session: AsyncSession,
@@ -31,13 +71,16 @@ async def create_premises(
     label: str,
     address: str | None = None,
     area: Decimal | None = None,
+    is_occupied: bool = False,
 ) -> Premises:
     label = label.strip()
     if not label:
         raise ValueError("Название помещения не может быть пустым.")
     if area is not None and area <= 0:
         raise ValueError("Площадь должна быть больше нуля.")
-    premises = Premises(landlord_id=landlord_id, label=label, address=address, area=area)
+    premises = Premises(
+        landlord_id=landlord_id, label=label, address=address, area=area, is_occupied=is_occupied
+    )
     session.add(premises)
     return premises
 
@@ -47,6 +90,14 @@ async def list_premises(session: AsyncSession, landlord_id: int) -> list[Premise
         select(Premises).where(Premises.landlord_id == landlord_id).order_by(Premises.id)
     )
     return list(result.scalars().all())
+
+
+async def set_premises_status(session: AsyncSession, premises_id: int, is_occupied: bool) -> Premises | None:
+    """Переключает занятость помещения (свободно/занято), без привязки к арендатору."""
+    premises = await session.get(Premises, premises_id)
+    if premises is not None:
+        premises.is_occupied = is_occupied
+    return premises
 
 
 # --- Арендаторы ------------------------------------------------------------

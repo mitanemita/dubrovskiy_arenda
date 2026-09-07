@@ -391,30 +391,90 @@ def _priority_kb(context: str, with_keep: bool = False, with_date: bool = False)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _tasks_menu_kb() -> InlineKeyboardMarkup:
+    """Компактное меню раздела «Задачи»."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Ближайшие", callback_data="tasks:recent"),
+         InlineKeyboardButton(text="✏️ Редактировать", callback_data="tasks:edit")],
+        [InlineKeyboardButton(text="➕ Задача", callback_data="task_add"),
+         InlineKeyboardButton(text="➕ Списком", callback_data="task_bulk")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
+    ])
+
+
+def _task_line(idx: int, t) -> str:
+    due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
+    return f"{idx}. {task_service.PRIORITY_LABEL.get(t.priority, '')} {t.title} · до {due}"
+
+
 @router.callback_query(F.data == "menu:tasks")
 async def tasks_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await callback.message.answer("<b>📝 Задачи</b> — что открыть?", reply_markup=_tasks_menu_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "tasks:recent")
+async def tasks_recent(callback: CallbackQuery, state: FSMContext) -> None:
+    """Первые 10 ближайших задач (без кнопок по каждой)."""
     await state.clear()
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         tasks = await task_service.list_tasks(session, lid) if lid else []
-
-    rows = [[
-        InlineKeyboardButton(text="➕ Задача", callback_data="task_add"),
-        InlineKeyboardButton(text="➕ Списком", callback_data="task_bulk"),
-    ]]
-    lines = ["<b>📝 Задачи (ближайшие сверху):</b>"]
+    lines = ["<b>📋 Ближайшие задачи:</b>"]
     if not tasks:
         lines.append("— пусто")
-    for t in tasks:
-        due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
-        lines.append(f"{task_service.PRIORITY_LABEL.get(t.priority, '')} {t.title} · до {due}")
-        rows.append([
-            InlineKeyboardButton(text=f"✏️ {t.title[:14]}", callback_data=f"taskedit:{t.id}"),
-            InlineKeyboardButton(text="✅", callback_data=f"taskdone:{t.id}"),
-            InlineKeyboardButton(text="🗑", callback_data=f"taskdel:{t.id}"),
-        ])
-    rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")])
+    for i, t in enumerate(tasks[:10], start=1):
+        lines.append(_task_line(i, t))
+    if len(tasks) > 10:
+        lines.append(f"… и ещё {len(tasks) - 10}. Для правки — «✏️ Редактировать».")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ К задачам", callback_data="menu:tasks")]])
+    await callback.message.answer("\n".join(lines), reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "tasks:edit")
+async def tasks_edit_list(callback: CallbackQuery, state: FSMContext) -> None:
+    """Список всех задач + кнопки-номера для выбора конкретной задачи."""
+    await state.clear()
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        tasks = await task_service.list_tasks(session, lid) if lid else []
+    lines = ["<b>✏️ Редактирование задач</b>", "Выберите номер задачи:" if tasks else "— пусто"]
+    for i, t in enumerate(tasks, start=1):
+        lines.append(_task_line(i, t))
+    # Кнопки-номера по 5 в ряд
+    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"tpick:{t.id}") for i, t in enumerate(tasks, start=1)]
+    rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    rows.append([InlineKeyboardButton(text="◀️ К задачам", callback_data="menu:tasks")])
     await callback.message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tpick:"))
+async def task_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    """Карточка выбранной задачи с действиями и кнопкой «Назад»."""
+    await state.clear()
+    task_id = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        t = await task_service.get_task(session, task_id)
+    if t is None:
+        await callback.answer("Задача не найдена", show_alert=True)
+        return
+    due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
+    text = (
+        f"<b>Задача #{t.id}</b>\n"
+        f"{task_service.PRIORITY_LABEL.get(t.priority, '')} {t.title}\n"
+        f"Срок: {due} · статус: {t.status.value}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"taskdone:{t.id}"),
+         InlineKeyboardButton(text="🗑 Удалить", callback_data=f"taskdel:{t.id}")],
+        [InlineKeyboardButton(text="🏷 Категория", callback_data=f"taskcat:{t.id}"),
+         InlineKeyboardButton(text="📅 Дата", callback_data=f"taskdate:{t.id}")],
+        [InlineKeyboardButton(text="◀️ К списку", callback_data="tasks:edit")],
+    ])
+    await callback.message.answer(text, reply_markup=kb)
     await callback.answer()
 
 
@@ -610,10 +670,11 @@ async def task_delete(callback: CallbackQuery) -> None:
         await task_service.delete_task(session, task_id)
         await session.commit()
     await callback.answer("Задача удалена")
+    _back = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ К списку задач", callback_data="tasks:edit")]])
     try:
-        await callback.message.edit_text("🗑 Задача удалена.")
+        await callback.message.edit_text("🗑 Задача удалена.", reply_markup=_back)
     except Exception:
-        pass
+        await callback.message.answer("🗑 Задача удалена.", reply_markup=_back)
 
 
 @router.callback_query(F.data.startswith("taskdone:"))
@@ -623,10 +684,11 @@ async def task_done(callback: CallbackQuery) -> None:
         await task_service.mark_done(session, task_id)
         await session.commit()
     await callback.answer("Задача выполнена")
+    _back = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ К списку задач", callback_data="tasks:edit")]])
     try:
-        await callback.message.edit_text("✅ Задача отмечена выполненной.")
+        await callback.message.edit_text("✅ Задача отмечена выполненной.", reply_markup=_back)
     except Exception:
-        pass
+        await callback.message.answer("✅ Задача отмечена выполненной.", reply_markup=_back)
 
 
 # --- Ручная отметка оплаты от арендатора -----------------------------------

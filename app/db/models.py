@@ -114,6 +114,8 @@ class Premises(TimestampMixin, Base):
     label: Mapped[str] = mapped_column(Text, nullable=False)   # название/№
     address: Mapped[str | None] = mapped_column(Text)          # товарный адрес
     area: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))  # м²
+    # Занятость объекта, ведётся вручную и не зависит от наличия арендатора/договора.
+    is_occupied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     landlord: Mapped[Landlord] = relationship(back_populates="premises")
     meters: Mapped[list[Meter]] = relationship(back_populates="premises", cascade="all, delete-orphan")

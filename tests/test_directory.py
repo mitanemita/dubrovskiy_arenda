@@ -136,3 +136,71 @@ async def test_create_meter_bad_coeff(session, landlord):
     await session.flush()
     with pytest.raises(ValueError):
         await directory_service.create_meter(session, premises_id=p.id, coefficient=Decimal("0"))
+
+
+# --- Статус помещения (свободно/занято) ---
+async def test_premises_status_default_and_toggle(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад")
+    await session.flush()
+    assert p.is_occupied is False
+    await directory_service.set_premises_status(session, p.id, True)
+    await session.flush()
+    assert p.is_occupied is True
+    await directory_service.set_premises_status(session, p.id, False)
+    await session.flush()
+    assert p.is_occupied is False
+
+
+async def test_create_premises_occupied(session, landlord):
+    p = await directory_service.create_premises(
+        session, landlord_id=landlord.id, label="Офис", is_occupied=True
+    )
+    await session.flush()
+    assert p.is_occupied is True
+
+
+# --- Данные для документов ---
+async def test_create_tenant_with_kpp_and_address(session, landlord):
+    """Поля, нужные для УПД: kpp и address."""
+    t = await directory_service.create_tenant(
+        session, landlord_id=landlord.id, name="ООО Ромашка", type=OrgType.ooo,
+        inn="7100000001", kpp="710001001", address="г. Тула, ул. Ленина, 1",
+    )
+    await session.flush()
+    assert t.kpp == "710001001"
+    assert t.address == "г. Тула, ул. Ленина, 1"
+
+
+async def test_update_landlord_fields(session, landlord):
+    await directory_service.update_landlord_field(session, landlord.id, "address", "г. Тула, ул. Мира, 5")
+    await directory_service.update_landlord_field(session, landlord.id, "bank_name", "АО Банк")
+    await directory_service.update_landlord_field(session, landlord.id, "bik", "044525225")
+    await directory_service.update_landlord_field(session, landlord.id, "account", "40702810900000000001")
+    await session.flush()
+    lord = await directory_service.get_landlord(session, landlord.id)
+    assert lord.address == "г. Тула, ул. Мира, 5"
+    assert lord.bank_name == "АО Банк"
+    assert lord.bik == "044525225"
+    assert lord.account == "40702810900000000001"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("bik", "12345"),          # не 9 цифр
+    ("account", "123"),        # не 20 цифр
+    ("kpp", "1234"),           # не 9 цифр
+    ("inn", "abc"),            # не цифры
+    ("name", "   "),           # пустое имя
+])
+async def test_update_landlord_validation(session, landlord, field, value):
+    with pytest.raises(ValueError):
+        await directory_service.update_landlord_field(session, landlord.id, field, value)
+
+
+async def test_update_landlord_clear_optional(session, landlord):
+    """Пустое значение необязательного поля очищает его (None)."""
+    await directory_service.update_landlord_field(session, landlord.id, "kpp", "710001001")
+    await session.flush()
+    await directory_service.update_landlord_field(session, landlord.id, "kpp", "")
+    await session.flush()
+    lord = await directory_service.get_landlord(session, landlord.id)
+    assert lord.kpp is None
