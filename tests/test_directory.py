@@ -159,6 +159,72 @@ async def test_create_premises_occupied(session, landlord):
     assert p.is_occupied is True
 
 
+async def _prem_tenant_lease(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад")
+    t = await directory_service.create_tenant(
+        session, landlord_id=landlord.id, name="ООО", type=OrgType.ooo, inn="7100000001"
+    )
+    await session.flush()
+    lease = await directory_service.create_lease(
+        session, tenant_id=t.id, premises_id=p.id, contract_no="1",
+        contract_date=date(2024, 1, 1), rent_amount=Decimal("1000"),
+    )
+    await session.flush()
+    return p, t, lease
+
+
+async def test_lease_marks_premises_occupied(session, landlord):
+    p, t, lease = await _prem_tenant_lease(session, landlord)
+    assert p.is_occupied is True
+
+
+async def test_delete_lease_frees_premises(session, landlord):
+    p, t, lease = await _prem_tenant_lease(session, landlord)
+    await directory_service.delete_lease(session, lease.id)
+    await session.flush()
+    await session.refresh(p)
+    assert p.is_occupied is False
+
+
+async def test_delete_tenant_frees_premises(session, landlord):
+    p, t, lease = await _prem_tenant_lease(session, landlord)
+    await directory_service.delete_tenant(session, t.id)
+    await session.flush()
+    await session.refresh(p)
+    assert p.is_occupied is False
+
+
+async def test_reassign_lease_moves_occupancy(session, landlord):
+    p, t, lease = await _prem_tenant_lease(session, landlord)
+    p2 = await directory_service.create_premises(session, landlord_id=landlord.id, label="Офис")
+    await session.flush()
+    await directory_service.update_lease(session, lease.id, premises_id=p2.id)
+    await session.flush()
+    await session.refresh(p)
+    await session.refresh(p2)
+    assert p.is_occupied is False
+    assert p2.is_occupied is True
+
+
+async def test_delete_premises_blocked_with_lease(session, landlord):
+    p, t, lease = await _prem_tenant_lease(session, landlord)
+    with pytest.raises(ValueError):
+        await directory_service.delete_premises(session, p.id)
+
+
+async def test_update_tenant_field(session, landlord):
+    t = await directory_service.create_tenant(
+        session, landlord_id=landlord.id, name="ООО", type=OrgType.ooo, inn="7100000001"
+    )
+    await session.flush()
+    await directory_service.update_tenant_field(session, t.id, "kpp", "710001001")
+    await directory_service.update_tenant_field(session, t.id, "email", "a@b.ru")
+    await session.flush()
+    assert t.kpp == "710001001" and t.email == "a@b.ru"
+    with pytest.raises(ValueError):
+        await directory_service.update_tenant_field(session, t.id, "kpp", "12")
+
+
 async def test_active_occupants(session, landlord):
     """active_occupants возвращает арендаторов по активным договорам на помещение."""
     p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад", is_occupied=True)

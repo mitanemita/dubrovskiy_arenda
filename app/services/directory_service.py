@@ -179,6 +179,10 @@ async def create_lease(
         status=LeaseStatus.active,
     )
     session.add(lease)
+    # Привязка арендатора к помещению -> помещение занято.
+    premises = await session.get(Premises, premises_id)
+    if premises is not None:
+        premises.is_occupied = True
     return lease
 
 
@@ -191,6 +195,159 @@ async def list_leases(session: AsyncSession, landlord_id: int) -> list[Lease]:
         .order_by(Lease.id)
     )
     return list(result.scalars().all())
+
+
+async def get_lease(session: AsyncSession, lease_id: int) -> Lease | None:
+    return await session.get(Lease, lease_id)
+
+
+async def _sync_occupancy(session: AsyncSession, premises_id: int) -> None:
+    """Пересчитывает занятость помещения по наличию активных договоров."""
+    premises = await session.get(Premises, premises_id)
+    if premises is None:
+        return
+    has_active = (await session.execute(
+        select(Lease.id).where(Lease.premises_id == premises_id, Lease.status == LeaseStatus.active).limit(1)
+    )).first() is not None
+    premises.is_occupied = has_active
+
+
+async def update_lease(
+    session: AsyncSession,
+    lease_id: int,
+    *,
+    rent_amount: Decimal | None = None,
+    payment_day: int | None = None,
+    premises_id: int | None = None,
+) -> Lease | None:
+    """Правит договор. При смене помещения освобождает старое и занимает новое."""
+    lease = await session.get(Lease, lease_id)
+    if lease is None:
+        return None
+    if rent_amount is not None:
+        if rent_amount <= 0:
+            raise ValueError("Сумма аренды должна быть больше нуля.")
+        lease.rent_amount = rent_amount
+    if payment_day is not None:
+        if not 1 <= payment_day <= 31:
+            raise ValueError("День оплаты должен быть в диапазоне 1..31.")
+        lease.payment_day = payment_day
+    if premises_id is not None and premises_id != lease.premises_id:
+        old = lease.premises_id
+        lease.premises_id = premises_id
+        await session.flush()
+        await _sync_occupancy(session, old)
+        await _sync_occupancy(session, premises_id)
+    return lease
+
+
+async def delete_lease(session: AsyncSession, lease_id: int) -> bool:
+    """Удаляет договор (с начислениями/платежами) и освобождает помещение при необходимости."""
+    lease = await session.get(Lease, lease_id)
+    if lease is None:
+        return False
+    premises_id = lease.premises_id
+    await session.delete(lease)
+    await session.flush()
+    await _sync_occupancy(session, premises_id)
+    return True
+
+
+async def delete_tenant(session: AsyncSession, tenant_id: int) -> bool:
+    """Удаляет арендатора (каскадно его договоры) и освобождает их помещения."""
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        return False
+    premises_ids = (await session.execute(
+        select(Lease.premises_id).where(Lease.tenant_id == tenant_id)
+    )).scalars().all()
+    await session.delete(tenant)
+    await session.flush()
+    for pid in set(premises_ids):
+        await _sync_occupancy(session, pid)
+    return True
+
+
+async def delete_meter(session: AsyncSession, meter_id: int) -> bool:
+    meter = await session.get(Meter, meter_id)
+    if meter is None:
+        return False
+    await session.delete(meter)
+    return True
+
+
+async def delete_premises(session: AsyncSession, premises_id: int) -> bool:
+    """Удаляет помещение. Нельзя, если на нём есть договоры (сначала удалите их)."""
+    premises = await session.get(Premises, premises_id)
+    if premises is None:
+        return False
+    has_lease = (await session.execute(
+        select(Lease.id).where(Lease.premises_id == premises_id).limit(1)
+    )).first() is not None
+    if has_lease:
+        raise ValueError("У помещения есть договоры — сначала удалите их.")
+    await session.delete(premises)
+    return True
+
+
+# Поля арендатора/помещения, правимые через бота: ключ -> подпись
+TENANT_FIELDS: dict[str, str] = {
+    "name": "Наименование",
+    "inn": "ИНН",
+    "kpp": "КПП",
+    "address": "Адрес",
+    "email": "Email",
+    "phone": "Телефон",
+}
+PREMISES_FIELDS: dict[str, str] = {
+    "label": "Название/№",
+    "address": "Адрес",
+    "area": "Площадь, м²",
+}
+
+
+async def update_tenant_field(session: AsyncSession, tenant_id: int, field: str, value: str) -> Tenant:
+    if field not in TENANT_FIELDS:
+        raise ValueError(f"Недопустимое поле: {field}")
+    value = value.strip()
+    if field == "name" and not value:
+        raise ValueError("Наименование не может быть пустым.")
+    if field == "inn":
+        value = _clean_inn(value)
+    if field == "kpp" and value and (not value.isdigit() or len(value) != 9):
+        raise ValueError("КПП должен состоять из 9 цифр.")
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        raise ValueError("Арендатор не найден.")
+    setattr(tenant, field, value if field in ("name", "inn") else (value or None))
+    return tenant
+
+
+async def update_premises_field(session: AsyncSession, premises_id: int, field: str, value: str) -> Premises:
+    if field not in PREMISES_FIELDS:
+        raise ValueError(f"Недопустимое поле: {field}")
+    value = value.strip()
+    premises = await session.get(Premises, premises_id)
+    if premises is None:
+        raise ValueError("Помещение не найдено.")
+    if field == "label":
+        if not value:
+            raise ValueError("Название не может быть пустым.")
+        premises.label = value
+    elif field == "address":
+        premises.address = value or None
+    elif field == "area":
+        if not value:
+            premises.area = None
+        else:
+            try:
+                area = Decimal(value.replace(",", "."))
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError("Площадь должна быть числом.") from exc
+            if area <= 0:
+                raise ValueError("Площадь должна быть больше нуля.")
+            premises.area = area
+    return premises
 
 
 # --- Счётчики --------------------------------------------------------------

@@ -33,6 +33,7 @@ from app.db.enums import ChargeType, DataSource, ExpenseCategory, LeaseStatus
 from app.db.models import Charge, Lease, Meter, Premises, Tenant, User
 from app.services import (
     adjustment_service,
+    billing_service,
     confirmation_service,
     expense_service,
     matching_service,
@@ -872,7 +873,15 @@ async def payment_manual_pick(callback: CallbackQuery, state: FSMContext) -> Non
     """После выбора договора — что оплачиваем: конкретное начисление или всю сумму."""
     lease_id = int(callback.data.split(":", 1)[1])
     await state.update_data(lease_id=lease_id)
+    period = billing_service.period_start(date.today())
     async with async_session_factory() as session:
+        # До-начисляем аренду (и электричество, если есть показания) за текущий месяц,
+        # чтобы их можно было отметить оплаченными, даже если начисления ещё не сгенерированы.
+        lease = await session.get(Lease, lease_id)
+        if lease is not None:
+            await billing_service.create_rent_charge(session, lease, period)
+            await billing_service.create_electricity_charge(session, lease, period)
+            await session.commit()
         charges = (await session.execute(
             select(Charge).where(Charge.lease_id == lease_id).order_by(Charge.period, Charge.type)
         )).scalars().all()
@@ -994,10 +1003,28 @@ async def reports(callback: CallbackQuery, state: FSMContext) -> None:
             await edit_or_send(callback.message, "Нет данных.", reply_markup=back_kb())
             await callback.answer()
             return
+        status = await report_service.tenant_payment_status(session, lid, date.today())
         by_prem = await report_service.payments_by_premises(session, lid)
         elec = await report_service.electricity_summary(session, lid, date.today())
 
-    lines = ["<b>Платежи по помещениям (подтверждённые):</b>"]
+    lines = [f"<b>💳 Оплата за текущий месяц: {status['paid']} из {status['total']} договоров</b>"]
+    if not status["rows"]:
+        lines.append("— активных договоров нет")
+    for r in status["rows"]:
+        if not r["has_charges"]:
+            mark = "➖"
+            tail = "нет начислений"
+        elif r["is_paid"]:
+            mark = "✅"
+            tail = f"оплачено {r['paid']} ₽"
+        else:
+            mark = "❌"
+            tail = f"долг {r['debt']} ₽ (оплачено {r['paid']} из {r['charged']} ₽)"
+        lines.append(f"{mark} {r['tenant']} · {r['premises']}: {tail}")
+    if status["total_debt"] > 0:
+        lines.append(f"<b>Итого долг: {status['total_debt']} ₽</b>")
+
+    lines.append("\n<b>Подтверждённые платежи по помещениям:</b>")
     lines += [f"• {r['premises']}: {r['confirmed_total']} ₽" for r in by_prem] or ["— нет"]
     lines.append("\n<b>Электричество за текущий месяц:</b>")
     lines += [
