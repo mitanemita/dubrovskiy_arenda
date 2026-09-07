@@ -46,12 +46,24 @@ from app.services import (
 router = Router()
 
 
+# Лимит длины сообщения Telegram — 4096 символов; берём с запасом.
+_TG_MAX_LEN = 4000
+
+
+def _clip(text: str) -> str:
+    """Обрезает текст до лимита Telegram, чтобы длинное сообщение не роняло бот."""
+    if len(text) <= _TG_MAX_LEN:
+        return text
+    return text[: _TG_MAX_LEN - 1] + "…"
+
+
 async def edit_or_send(message: Message, text: str, reply_markup=None) -> None:
     """Навигация без спама: правит текущее сообщение бота, иначе шлёт новое.
 
     Используется в callback-хендлерах, чтобы переход в другое меню заменял
-    предыдущее сообщение, а не добавлял новое.
+    предыдущее сообщение, а не добавлял новое. Текст обрезается до лимита Telegram.
     """
+    text = _clip(text)
     try:
         await message.edit_text(text, reply_markup=reply_markup)
     except TelegramBadRequest as exc:
@@ -454,19 +466,50 @@ async def tasks_recent(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+# Сколько задач показываем на одной странице редактирования
+_TASKS_PAGE = 20
+
+
 @router.callback_query(F.data == "tasks:edit")
+@router.callback_query(F.data.startswith("tasks:editp:"))
 async def tasks_edit_list(callback: CallbackQuery, state: FSMContext) -> None:
-    """Список всех задач + кнопки-номера для выбора конкретной задачи."""
+    """Постраничный список задач + кнопки-номера для выбора конкретной задачи.
+
+    Пагинация нужна, чтобы длинный список не превышал лимит сообщения Telegram.
+    """
     await state.clear()
+    offset = int(callback.data.split(":")[2]) if callback.data.startswith("tasks:editp:") else 0
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         tasks = await task_service.list_tasks(session, lid) if lid else []
-    lines = ["<b>✏️ Редактирование задач</b>", "Выберите номер задачи:" if tasks else "— пусто"]
-    for i, t in enumerate(tasks, start=1):
-        lines.append(_task_line(i, t))
-    # Кнопки-номера по 5 в ряд
-    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"tpick:{t.id}") for i, t in enumerate(tasks, start=1)]
+
+    total = len(tasks)
+    offset = max(0, min(offset, (total - 1) // _TASKS_PAGE * _TASKS_PAGE if total else 0))
+    page = tasks[offset:offset + _TASKS_PAGE]
+
+    lines = ["<b>✏️ Редактирование задач</b>"]
+    if not tasks:
+        lines.append("— пусто")
+    else:
+        page_no = offset // _TASKS_PAGE + 1
+        pages_total = (total + _TASKS_PAGE - 1) // _TASKS_PAGE
+        lines.append(f"Стр. {page_no}/{pages_total}. Выберите номер задачи:")
+        for i, t in enumerate(page, start=offset + 1):
+            lines.append(_task_line(i, t))
+
+    # Кнопки-номера только для текущей страницы, по 5 в ряд
+    num_buttons = [
+        InlineKeyboardButton(text=str(offset + i), callback_data=f"tpick:{t.id}")
+        for i, t in enumerate(page, start=1)
+    ]
     rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton(text="◀️ Пред.", callback_data=f"tasks:editp:{offset - _TASKS_PAGE}"))
+    if offset + _TASKS_PAGE < total:
+        nav.append(InlineKeyboardButton(text="След. ▶️", callback_data=f"tasks:editp:{offset + _TASKS_PAGE}"))
+    if nav:
+        rows.append(nav)
     rows.append([InlineKeyboardButton(text="◀️ К задачам", callback_data="menu:tasks")])
     await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
