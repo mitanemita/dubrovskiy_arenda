@@ -10,6 +10,7 @@ from aiogram.enums import ParseMode
 from app.bot import notifier
 from app.bot.handlers import router
 from app.bot.handlers_admin import router as admin_router
+from app.bot.handlers_directory import router as directory_router
 from app.config import get_settings
 from app.db.base import async_session_factory
 from app.email.sender import send_email
@@ -62,6 +63,7 @@ async def run() -> None:
     dp = Dispatcher()
     dp.include_router(router)
     dp.include_router(admin_router)
+    dp.include_router(directory_router)
 
     dispatch_task = asyncio.create_task(_dispatch_loop(bot))
     logger.info("Бот запущен (polling)")

@@ -4,13 +4,13 @@ from __future__ import annotations
 from datetime import date
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from sqlalchemy import select
 
 from app.bot.handlers_admin import show_main_menu
-from app.bot.keyboards import CB_PAY
+from app.bot.keyboards import CB_PAY, MENU_SECTIONS
 from app.config import get_settings
 from app.db.base import async_session_factory
 from app.db.models import Payment, User
@@ -36,9 +36,22 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     async with async_session_factory() as session:
         allowed = await _is_allowed(session, message.from_user.id)
     if not allowed:
-        await message.answer("⛔ Доступ запрещён. Обратитесь к администратору.")
+        await message.answer("⛔ Доступ запрещён. Обратитесь к администратору.", reply_markup=ReplyKeyboardRemove())
         return
-    await show_main_menu(message, greet=True)
+    # Убираем старую reply-клавиатуру (она «залипает» в чате Telegram),
+    # затем показываем инлайн-меню.
+    await message.answer("👋 Бот учёта аренды.", reply_markup=ReplyKeyboardRemove())
+    await show_main_menu(message)
+
+
+@router.message(StateFilter(None), F.text.in_(set(MENU_SECTIONS.values())))
+async def legacy_reply_button(message: Message, state: FSMContext) -> None:
+    """Совместимость: нажата кнопка старой reply-клавиатуры (вне активного ввода).
+
+    Убираем залипшую клавиатуру и открываем актуальное инлайн-меню.
+    """
+    await message.answer("Меню теперь под сообщением 👇", reply_markup=ReplyKeyboardRemove())
+    await show_main_menu(message)
 
 
 @router.callback_query(F.data.startswith(f"{CB_PAY}:"))

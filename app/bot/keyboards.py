@@ -15,6 +15,7 @@ CB_NAV = "nav"      # nav:home
 
 # Разделы главного меню: callback-ключ -> подпись кнопки
 MENU_SECTIONS: dict[str, str] = {
+    "directory": "🗂 Справочники",
     "settings": "⚙️ Настройки",
     "expense": "💸 Расход",
     "readings": "🔢 Показания",

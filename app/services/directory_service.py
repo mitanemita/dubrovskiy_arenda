@@ -1,0 +1,160 @@
+"""Справочники: создание и выборка помещений, арендаторов, договоров, счётчиков.
+
+Вводятся оператором через бота (инлайн-мастера). Вся бизнес-валидация — здесь,
+чтобы её можно было покрыть тестами независимо от Telegram-слоя.
+"""
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.enums import LeaseStatus, OrgType
+from app.db.models import Lease, Meter, Premises, Tenant
+
+
+def _clean_inn(inn: str) -> str:
+    """Проверяет ИНН: только цифры, длина 10 (юрлицо) или 12 (ИП/физлицо)."""
+    digits = inn.strip()
+    if not digits.isdigit() or len(digits) not in (10, 12):
+        raise ValueError("ИНН должен состоять из 10 или 12 цифр.")
+    return digits
+
+
+# --- Помещения -------------------------------------------------------------
+async def create_premises(
+    session: AsyncSession,
+    *,
+    landlord_id: int,
+    label: str,
+    address: str | None = None,
+    area: Decimal | None = None,
+) -> Premises:
+    label = label.strip()
+    if not label:
+        raise ValueError("Название помещения не может быть пустым.")
+    if area is not None and area <= 0:
+        raise ValueError("Площадь должна быть больше нуля.")
+    premises = Premises(landlord_id=landlord_id, label=label, address=address, area=area)
+    session.add(premises)
+    return premises
+
+
+async def list_premises(session: AsyncSession, landlord_id: int) -> list[Premises]:
+    result = await session.execute(
+        select(Premises).where(Premises.landlord_id == landlord_id).order_by(Premises.id)
+    )
+    return list(result.scalars().all())
+
+
+# --- Арендаторы ------------------------------------------------------------
+async def create_tenant(
+    session: AsyncSession,
+    *,
+    landlord_id: int,
+    name: str,
+    type: OrgType,
+    inn: str,
+    kpp: str | None = None,
+    address: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+) -> Tenant:
+    name = name.strip()
+    if not name:
+        raise ValueError("Наименование арендатора не может быть пустым.")
+    tenant = Tenant(
+        landlord_id=landlord_id,
+        name=name,
+        type=type,
+        inn=_clean_inn(inn),
+        kpp=kpp,
+        address=address,
+        email=email,
+        phone=phone,
+    )
+    session.add(tenant)
+    return tenant
+
+
+async def list_tenants(session: AsyncSession, landlord_id: int) -> list[Tenant]:
+    result = await session.execute(
+        select(Tenant).where(Tenant.landlord_id == landlord_id).order_by(Tenant.id)
+    )
+    return list(result.scalars().all())
+
+
+# --- Договоры --------------------------------------------------------------
+async def create_lease(
+    session: AsyncSession,
+    *,
+    tenant_id: int,
+    premises_id: int,
+    contract_no: str,
+    contract_date: date,
+    rent_amount: Decimal,
+    payment_day: int = 5,
+) -> Lease:
+    contract_no = contract_no.strip()
+    if not contract_no:
+        raise ValueError("Номер договора не может быть пустым.")
+    if rent_amount <= 0:
+        raise ValueError("Сумма аренды должна быть больше нуля.")
+    if not 1 <= payment_day <= 31:
+        raise ValueError("День оплаты должен быть в диапазоне 1..31.")
+    lease = Lease(
+        tenant_id=tenant_id,
+        premises_id=premises_id,
+        contract_no=contract_no,
+        contract_date=contract_date,
+        rent_amount=rent_amount,
+        payment_day=payment_day,
+        status=LeaseStatus.active,
+    )
+    session.add(lease)
+    return lease
+
+
+async def list_leases(session: AsyncSession, landlord_id: int) -> list[Lease]:
+    """Договоры арендодателя (через связь арендатора)."""
+    result = await session.execute(
+        select(Lease)
+        .join(Tenant, Tenant.id == Lease.tenant_id)
+        .where(Tenant.landlord_id == landlord_id)
+        .order_by(Lease.id)
+    )
+    return list(result.scalars().all())
+
+
+# --- Счётчики --------------------------------------------------------------
+async def create_meter(
+    session: AsyncSession,
+    *,
+    premises_id: int,
+    serial_no: str | None = None,
+    label: str | None = None,
+    coefficient: Decimal | None = None,
+) -> Meter:
+    if coefficient is not None and coefficient <= 0:
+        raise ValueError("Коэффициент должен быть больше нуля.")
+    meter = Meter(
+        premises_id=premises_id,
+        serial_no=serial_no,
+        label=label,
+        coefficient=coefficient,
+    )
+    session.add(meter)
+    return meter
+
+
+async def list_meters(session: AsyncSession, landlord_id: int) -> list[tuple[Meter, str]]:
+    """Счётчики арендодателя со ссылкой на помещение (Meter, premises_label)."""
+    result = await session.execute(
+        select(Meter, Premises.label)
+        .join(Premises, Premises.id == Meter.premises_id)
+        .where(Premises.landlord_id == landlord_id)
+        .order_by(Meter.id)
+    )
+    return [(m, label) for m, label in result.all()]
