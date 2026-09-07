@@ -8,6 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 
+from app.bot.handlers_admin import main_menu
 from app.bot.keyboards import CB_PAY
 from app.config import get_settings
 from app.db.base import async_session_factory
@@ -37,7 +38,8 @@ async def cmd_start(message: Message) -> None:
         return
     await message.answer(
         "👋 Бот учёта аренды.\n"
-        "Сюда приходят платежи на подтверждение и уведомления о нехватке данных."
+        "Сюда приходят платежи на подтверждение и уведомления о нехватке данных.",
+        reply_markup=main_menu(),
     )
 
 
