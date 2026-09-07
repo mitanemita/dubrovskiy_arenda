@@ -17,9 +17,8 @@ CB_NAV = "nav"      # nav:home
 MENU_SECTIONS: dict[str, str] = {
     "directory": "🗂 Справочники",
     "settings": "⚙️ Настройки",
-    "expense": "💸 Расход",
+    "expense": "💸 Расходы",
     "readings": "🔢 Показания",
-    "adjust": "✏️ Корректировка",
     "tasks": "📝 Задачи",
     "pay": "💰 Отметить оплату",
     "reports": "📊 Отчёты",

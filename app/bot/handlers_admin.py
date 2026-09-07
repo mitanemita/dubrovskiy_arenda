@@ -29,8 +29,8 @@ from sqlalchemy import select
 
 from app.bot.keyboards import back_kb, cancel_kb, main_menu_kb
 from app.db.base import async_session_factory
-from app.db.enums import DataSource, ExpenseCategory, LeaseStatus
-from app.db.models import Lease, Meter, Premises, Tenant, User
+from app.db.enums import ChargeType, DataSource, ExpenseCategory, LeaseStatus
+from app.db.models import Charge, Lease, Meter, Premises, Tenant, User
 from app.services import (
     adjustment_service,
     confirmation_service,
@@ -220,14 +220,42 @@ async def settings_save(message: Message, state: FSMContext) -> None:
 
 
 # --- Расходы ---------------------------------------------------------------
+# Русские названия всех категорий расходов (для списка и правки)
+_EXPENSE_LABELS = {
+    ExpenseCategory.server: "Серверная",
+    ExpenseCategory.electricity: "Электричество",
+    ExpenseCategory.salary: "Зарплаты",
+    ExpenseCategory.travel: "Командировочные",
+    ExpenseCategory.repair: "Текущий ремонт",
+    ExpenseCategory.docs: "Документация",
+    ExpenseCategory.taxes: "Налоги",
+    ExpenseCategory.other: "Прочее",
+}
+
+
+def _expense_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить расход", callback_data="exp_add")],
+        [InlineKeyboardButton(text="📋 Расходы месяца (правка)", callback_data="exp_list")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
+    ])
+
+
 @router.callback_query(F.data == "menu:expense")
 async def expense_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await edit_or_send(callback.message, "<b>💸 Расходы</b> — что сделать?", reply_markup=_expense_menu_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "exp_add")
+async def expense_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     rows = [
         [InlineKeyboardButton(text=title, callback_data=f"exp:{code}")]
         for code, title in _EXPENSE_CHOICES.items()
     ]
-    rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")])
+    rows.append([InlineKeyboardButton(text="◀️ К расходам", callback_data="menu:expense")])
     await edit_or_send(callback.message, "Категория расхода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
@@ -256,37 +284,44 @@ async def expense_save(message: Message, state: FSMContext) -> None:
         )
         await session.commit()
     await state.clear()
-    await message.answer(f"✅ Расход {amount} ₽ добавлен.", reply_markup=main_menu_kb())
+    await message.answer(f"✅ Расход {amount} ₽ добавлен.", reply_markup=_expense_menu_kb())
 
 
-# --- Корректировка (с аудитом) --------------------------------------------
-@router.callback_query(F.data == "menu:adjust")
-async def adjust_start(callback: CallbackQuery, state: FSMContext) -> None:
+# Список расходов месяца + правка суммы (с аудитом) — вместо общей «Корректировки»
+@router.callback_query(F.data == "exp_list")
+async def expense_list(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        items = await expense_service.list_expenses(session, lid, date.today()) if lid else []
+    lines = ["<b>💸 Расходы за текущий месяц</b> (нажмите № для правки суммы):"]
+    if not items:
+        lines.append("— пусто")
+    for i, e in enumerate(items, start=1):
+        lines.append(f"{i}. {_EXPENSE_LABELS.get(e.category, e.category.value)}: {e.amount} ₽")
+    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"ecorr:{e.id}") for i, e in enumerate(items, start=1)]
+    rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    rows.append([InlineKeyboardButton(text="◀️ К расходам", callback_data="menu:expense")])
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ecorr:"))
+async def expense_correct_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.update_data(entity_type="expense", entity_id=int(callback.data.split(":", 1)[1]))
     await state.set_state(AdjustFSM.amount)
-    await edit_or_send(callback.message,
-        "Корректировка суммы. Формат: <b>тип id сумма</b>\n"
-        "• тип: charge (начисление) или expense (расход)\n"
-        "• Пример: charge 12 45000",
-        reply_markup=cancel_kb(),
-    )
+    await edit_or_send(callback.message, "Введите новую сумму расхода, ₽:", reply_markup=cancel_kb())
     await callback.answer()
 
 
 @router.message(AdjustFSM.amount)
-async def adjust_parse(message: Message, state: FSMContext) -> None:
-    parts = message.text.split()
-    if len(parts) != 3 or parts[0] not in ("charge", "expense"):
-        await message.answer("❌ Формат: тип id сумма (тип: charge или expense). Повторите:", reply_markup=cancel_kb())
-        return
-    amount = _parse_amount(parts[2])
+async def adjust_amount(message: Message, state: FSMContext) -> None:
+    amount = _parse_amount(message.text)
     if amount is None or amount < 0:
-        await message.answer("❌ Некорректная сумма. Повторите:", reply_markup=cancel_kb())
+        await message.answer("❌ Введите неотрицательную сумму. Повторите:", reply_markup=cancel_kb())
         return
-    if not parts[1].isdigit():
-        await message.answer("❌ id должен быть числом. Повторите:", reply_markup=cancel_kb())
-        return
-    await state.update_data(entity_type=parts[0], entity_id=int(parts[1]), new_amount=str(amount))
+    await state.update_data(new_amount=str(amount))
     await state.set_state(AdjustFSM.reason)
     await message.answer("Укажите причину корректировки:", reply_markup=cancel_kb())
 
@@ -316,7 +351,7 @@ async def adjust_save(message: Message, state: FSMContext) -> None:
             await message.answer(f"❌ {exc}", reply_markup=main_menu_kb())
             return
     await state.clear()
-    await message.answer("✅ Корректировка сохранена (записана в аудит).", reply_markup=main_menu_kb())
+    await message.answer("✅ Сумма скорректирована (записано в аудит).", reply_markup=_expense_menu_kb())
 
 
 # --- Показания счётчиков (ручной ввод / электричество) --------------------
@@ -824,11 +859,99 @@ async def payment_manual_menu(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.answer()
 
 
+_CHARGE_TYPE_LABEL = {
+    ChargeType.rent: "Аренда",
+    ChargeType.electricity: "Электричество",
+    ChargeType.penalty: "Пеня",
+    ChargeType.other: "Прочее",
+}
+
+
 @router.callback_query(F.data.startswith("pm:"))
 async def payment_manual_pick(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(lease_id=int(callback.data.split(":", 1)[1]))
+    """После выбора договора — что оплачиваем: конкретное начисление или всю сумму."""
+    lease_id = int(callback.data.split(":", 1)[1])
+    await state.update_data(lease_id=lease_id)
+    async with async_session_factory() as session:
+        charges = (await session.execute(
+            select(Charge).where(Charge.lease_id == lease_id).order_by(Charge.period, Charge.type)
+        )).scalars().all()
+    rows: list[list[InlineKeyboardButton]] = []
+    for c in charges:
+        outstanding = c.amount - c.paid_amount
+        if outstanding <= 0:
+            continue
+        label = f"{_CHARGE_TYPE_LABEL.get(c.type, c.type.value)} {c.period.strftime('%m.%Y')}: {outstanding} ₽"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"payc:{c.id}")])
+    rows.append([InlineKeyboardButton(text="💰 Произвольная сумма", callback_data=f"paylump:{lease_id}")])
+    rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")])
+    hint = "Выберите начисление к оплате или «Произвольная сумма»:" if len(rows) > 2 else \
+        "Открытых начислений нет. Можно отметить произвольную сумму:"
+    await edit_or_send(callback.message, hint, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("paylump:"))
+async def payment_lump_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(pay_mode="lump", lease_id=int(callback.data.split(":", 1)[1]))
     await state.set_state(PayFSM.amount)
     await edit_or_send(callback.message, "Введите сумму поступившей оплаты, ₽:", reply_markup=cancel_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("payc:"))
+async def payment_charge_start(callback: CallbackQuery, state: FSMContext) -> None:
+    charge_id = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        charge = await session.get(Charge, charge_id)
+    if charge is None:
+        await callback.answer("Начисление не найдено", show_alert=True)
+        return
+    outstanding = charge.amount - charge.paid_amount
+    await state.update_data(pay_mode="charge", charge_id=charge_id)
+    await state.set_state(PayFSM.amount)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Оплатить полностью ({outstanding} ₽)", callback_data=f"payfull:{charge_id}")],
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")],
+    ])
+    label = _CHARGE_TYPE_LABEL.get(charge.type, charge.type.value)
+    await edit_or_send(
+        callback.message,
+        f"Оплата «{label}» за {charge.period.strftime('%m.%Y')} (остаток {outstanding} ₽).\n"
+        f"Введите сумму или нажмите «Оплатить полностью»:",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+async def _finish_charge_payment(message: Message, tg_id: int, state: FSMContext, charge_id: int, amount: Decimal) -> None:
+    async with async_session_factory() as session:
+        user = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
+        charge = await session.get(Charge, charge_id)
+        if charge is None:
+            await state.clear()
+            await message.answer("❌ Начисление не найдено.", reply_markup=main_menu_kb())
+            return
+        label = _CHARGE_TYPE_LABEL.get(charge.type, charge.type.value)
+        result = await payment_service.pay_charge(
+            session, charge, amount, confirmed_by_id=user.id if user else None, today=date.today()
+        )
+        await session.commit()
+    await state.clear()
+    note = "закрыто полностью" if result["fully_paid"] else f"остаток {result['remaining']} ₽"
+    await message.answer(f"✅ Оплата «{label}» {result['allocated']} ₽ отмечена ({note}).", reply_markup=main_menu_kb())
+
+
+@router.callback_query(F.data.startswith("payfull:"))
+async def payment_charge_full(callback: CallbackQuery, state: FSMContext) -> None:
+    charge_id = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        charge = await session.get(Charge, charge_id)
+    if charge is None:
+        await callback.answer("Начисление не найдено", show_alert=True)
+        return
+    outstanding = charge.amount - charge.paid_amount
+    await _finish_charge_payment(callback.message, callback.from_user.id, state, charge_id, outstanding)
     await callback.answer()
 
 
@@ -839,6 +962,9 @@ async def payment_manual_save(message: Message, state: FSMContext) -> None:
         await message.answer("❌ Введите положительную сумму. Повторите:", reply_markup=cancel_kb())
         return
     data = await state.get_data()
+    if data.get("pay_mode") == "charge":
+        await _finish_charge_payment(message, message.from_user.id, state, data["charge_id"], amount)
+        return
     async with async_session_factory() as session:
         user = (await session.execute(select(User).where(User.tg_id == message.from_user.id))).scalar_one_or_none()
         payment = await payment_service.register_payment(

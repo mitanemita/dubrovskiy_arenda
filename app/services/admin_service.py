@@ -13,7 +13,7 @@ from decimal import Decimal
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.enums import DataSource, LeaseStatus, OrgType
+from app.db.enums import DataSource, ExpenseCategory, ExpenseMode, LeaseStatus, OrgType
 from app.db.models import (
     Adjustment,
     Charge,
@@ -168,6 +168,14 @@ async def seed_test_data(session: AsyncSession, landlord_id: int) -> dict[str, i
     await session.flush()
     await payment_service.confirm_payment(session, pay2, confirmed_by_id=None, today=today)
 
+    expenses = [
+        Expense(landlord_id=landlord_id, category=ExpenseCategory.travel, mode=ExpenseMode.manual,
+                amount=Decimal("5000.00"), period=period, description="Демо: командировка"),
+        Expense(landlord_id=landlord_id, category=ExpenseCategory.repair, mode=ExpenseMode.manual,
+                amount=Decimal("12000.00"), period=period, description="Демо: ремонт"),
+    ]
+    session.add_all(expenses)
+
     tasks = [
         Task(landlord_id=landlord_id, title="Демо: проверить показания счётчика", due_date=today + timedelta(days=3)),
         Task(landlord_id=landlord_id, title="Демо: продлить договор 17/2026-АР", due_date=today + timedelta(days=14)),
@@ -177,4 +185,4 @@ async def seed_test_data(session: AsyncSession, landlord_id: int) -> dict[str, i
     await session.flush()
 
     return {"premises": 3, "tenants": 2, "leases": 2, "meters": 2, "readings": 2,
-            "charges": 4, "payments": 2, "tasks": len(tasks)}
+            "charges": 4, "payments": 2, "expenses": len(expenses), "tasks": len(tasks)}
