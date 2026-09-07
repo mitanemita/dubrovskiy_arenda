@@ -17,7 +17,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from app.bot.handlers_admin import _landlord_id, _parse_amount, _parse_date
+from app.bot.handlers_admin import _landlord_id, _parse_amount, _parse_date, edit_or_send
 from app.db.base import async_session_factory
 from app.db.enums import OrgType
 from app.db.models import Premises
@@ -99,7 +99,7 @@ class MeterFSM(StatesGroup):
 @router.callback_query(F.data == "menu:directory")
 async def directory_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await callback.message.answer("🗂 Справочники — что открыть?", reply_markup=_dir_menu_kb())
+    await edit_or_send(callback.message, "🗂 Справочники — что открыть?", reply_markup=_dir_menu_kb())
     await callback.answer()
 
 
@@ -124,7 +124,7 @@ async def premises_list(callback: CallbackQuery, state: FSMContext) -> None:
     rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
     rows.append([InlineKeyboardButton(text="➕ Добавить", callback_data="dadd:premises")])
     rows.append([InlineKeyboardButton(text="◀️ Справочники", callback_data="menu:directory")])
-    await callback.message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
 
@@ -146,7 +146,7 @@ async def premises_card(callback: CallbackQuery, state: FSMContext) -> None:
         [InlineKeyboardButton(text=toggle_txt, callback_data=f"pstat:{p.id}:{toggle_to}")],
         [InlineKeyboardButton(text="◀️ К помещениям", callback_data="dir:premises")],
     ])
-    await callback.message.answer(text, reply_markup=kb)
+    await edit_or_send(callback.message, text, reply_markup=kb)
     await callback.answer()
 
 
@@ -164,7 +164,7 @@ async def premises_set_status(callback: CallbackQuery, state: FSMContext) -> Non
 async def premises_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(PremisesFSM.label)
-    await callback.message.answer("Название/№ помещения:", reply_markup=_io_kb())
+    await edit_or_send(callback.message, "Название/№ помещения:", reply_markup=_io_kb())
     await callback.answer()
 
 
@@ -182,7 +182,7 @@ async def premises_label(message: Message, state: FSMContext) -> None:
 async def premises_skip_addr(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(address=None)
     await state.set_state(PremisesFSM.area)
-    await callback.message.answer("Площадь, м² (или пропустите):", reply_markup=_io_kb("dsk:prem_area"))
+    await edit_or_send(callback.message, "Площадь, м² (или пропустите):", reply_markup=_io_kb("dsk:prem_area"))
     await callback.answer()
 
 
@@ -205,7 +205,7 @@ def _premises_status_kb() -> InlineKeyboardMarkup:
 async def premises_skip_area(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(area=None)
     await state.set_state(PremisesFSM.status)
-    await callback.message.answer("Статус помещения:", reply_markup=_premises_status_kb())
+    await edit_or_send(callback.message, "Статус помещения:", reply_markup=_premises_status_kb())
     await callback.answer()
 
 
@@ -238,11 +238,11 @@ async def premises_status(callback: CallbackQuery, state: FSMContext) -> None:
         except ValueError as exc:
             await session.rollback()
             await state.clear()
-            await callback.message.answer(f"❌ {exc}", reply_markup=main_menu_kb())
+            await edit_or_send(callback.message, f"❌ {exc}", reply_markup=main_menu_kb())
             await callback.answer()
             return
     await state.clear()
-    await callback.message.answer(
+    await edit_or_send(callback.message, 
         f"✅ Помещение #{pid} «{data['label']}» добавлено ({_status_label(is_occupied)}).",
         reply_markup=_list_kb("dadd:premises"),
     )
@@ -261,7 +261,7 @@ async def tenants_list(callback: CallbackQuery, state: FSMContext) -> None:
         lines.append("— пусто")
     for t in items:
         lines.append(f"#{t.id} · {t.name} · ИНН {t.inn}")
-    await callback.message.answer("\n".join(lines), reply_markup=_list_kb("dadd:tenants"))
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_list_kb("dadd:tenants"))
     await callback.answer()
 
 
@@ -269,7 +269,7 @@ async def tenants_list(callback: CallbackQuery, state: FSMContext) -> None:
 async def tenant_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(TenantFSM.name)
-    await callback.message.answer("Наименование арендатора (как в документах):", reply_markup=_io_kb())
+    await edit_or_send(callback.message, "Наименование арендатора (как в документах):", reply_markup=_io_kb())
     await callback.answer()
 
 
@@ -293,7 +293,7 @@ async def tenant_name(message: Message, state: FSMContext) -> None:
 async def tenant_type(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(org_type=callback.data.split(":", 1)[1])
     await state.set_state(TenantFSM.inn)
-    await callback.message.answer("ИНН (10 цифр для юрлица, 12 — для ИП/физлица):", reply_markup=_io_kb())
+    await edit_or_send(callback.message, "ИНН (10 цифр для юрлица, 12 — для ИП/физлица):", reply_markup=_io_kb())
     await callback.answer()
 
 
@@ -315,7 +315,7 @@ async def tenant_inn(message: Message, state: FSMContext) -> None:
 async def tenant_skip_kpp(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(kpp=None)
     await state.set_state(TenantFSM.address)
-    await callback.message.answer(
+    await edit_or_send(callback.message, 
         "Адрес арендатора (нужен для УПД) или пропустите:", reply_markup=_io_kb("dsk:ten_addr")
     )
     await callback.answer()
@@ -336,7 +336,7 @@ async def tenant_kpp(message: Message, state: FSMContext) -> None:
 async def tenant_skip_addr(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(address=None)
     await state.set_state(TenantFSM.email)
-    await callback.message.answer(
+    await edit_or_send(callback.message, 
         "Email арендатора (для отправки документов) или пропустите:", reply_markup=_io_kb("dsk:ten_email")
     )
     await callback.answer()
@@ -353,7 +353,7 @@ async def tenant_address(message: Message, state: FSMContext) -> None:
 async def tenant_skip_email(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(email=None)
     await state.set_state(TenantFSM.phone)
-    await callback.message.answer("Телефон арендатора или пропустите:", reply_markup=_io_kb("dsk:ten_phone"))
+    await edit_or_send(callback.message, "Телефон арендатора или пропустите:", reply_markup=_io_kb("dsk:ten_phone"))
     await callback.answer()
 
 
@@ -415,7 +415,7 @@ async def leases_list(callback: CallbackQuery, state: FSMContext) -> None:
         lines.append("— пусто")
     for l in items:
         lines.append(f"#{l.id} · №{l.contract_no} · аренда {l.rent_amount} ₽ · статус {l.status.value}")
-    await callback.message.answer("\n".join(lines), reply_markup=_list_kb("dadd:leases"))
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_list_kb("dadd:leases"))
     await callback.answer()
 
 
@@ -426,7 +426,7 @@ async def lease_add(callback: CallbackQuery, state: FSMContext) -> None:
         lid = await _landlord_id(session, callback.from_user.id)
         tenants = await directory_service.list_tenants(session, lid) if lid else []
     if not tenants:
-        await callback.message.answer(
+        await edit_or_send(callback.message, 
             "Сначала добавьте арендатора (раздел «Арендаторы»).", reply_markup=_dir_menu_kb()
         )
         await callback.answer()
@@ -434,7 +434,7 @@ async def lease_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(LeaseFSM.tenant)
     rows = [[InlineKeyboardButton(text=f"{t.name} (ИНН {t.inn})", callback_data=f"dlt:{t.id}")] for t in tenants]
     rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")])
-    await callback.message.answer("Выберите арендатора:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await edit_or_send(callback.message, "Выберите арендатора:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
 
@@ -446,7 +446,7 @@ async def lease_pick_tenant(callback: CallbackQuery, state: FSMContext) -> None:
         premises = await directory_service.list_premises(session, lid) if lid else []
     if not premises:
         await state.clear()
-        await callback.message.answer(
+        await edit_or_send(callback.message, 
             "Сначала добавьте помещение (раздел «Помещения»).", reply_markup=_dir_menu_kb()
         )
         await callback.answer()
@@ -454,7 +454,7 @@ async def lease_pick_tenant(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(LeaseFSM.premises)
     rows = [[InlineKeyboardButton(text=p.label, callback_data=f"dlp:{p.id}")] for p in premises]
     rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")])
-    await callback.message.answer("Выберите помещение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await edit_or_send(callback.message, "Выберите помещение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
 
@@ -462,7 +462,7 @@ async def lease_pick_tenant(callback: CallbackQuery, state: FSMContext) -> None:
 async def lease_pick_premises(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(premises_id=int(callback.data.split(":", 1)[1]))
     await state.set_state(LeaseFSM.contract_no)
-    await callback.message.answer("Номер договора:", reply_markup=_io_kb())
+    await edit_or_send(callback.message, "Номер договора:", reply_markup=_io_kb())
     await callback.answer()
 
 
@@ -560,7 +560,7 @@ async def meters_list(callback: CallbackQuery, state: FSMContext) -> None:
         title = m.serial_no or m.label or f"счётчик {m.id}"
         coeff = f" · k={m.coefficient}" if m.coefficient is not None else ""
         lines.append(f"#{m.id} · {prem} · {title}{coeff}")
-    await callback.message.answer("\n".join(lines), reply_markup=_list_kb("dadd:meters"))
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_list_kb("dadd:meters"))
     await callback.answer()
 
 
@@ -571,7 +571,7 @@ async def meter_add(callback: CallbackQuery, state: FSMContext) -> None:
         lid = await _landlord_id(session, callback.from_user.id)
         premises = await directory_service.list_premises(session, lid) if lid else []
     if not premises:
-        await callback.message.answer(
+        await edit_or_send(callback.message, 
             "Сначала добавьте помещение (раздел «Помещения»).", reply_markup=_dir_menu_kb()
         )
         await callback.answer()
@@ -579,7 +579,7 @@ async def meter_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(MeterFSM.premises)
     rows = [[InlineKeyboardButton(text=p.label, callback_data=f"dmp:{p.id}")] for p in premises]
     rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")])
-    await callback.message.answer("Помещение счётчика:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await edit_or_send(callback.message, "Помещение счётчика:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
 
@@ -587,7 +587,7 @@ async def meter_add(callback: CallbackQuery, state: FSMContext) -> None:
 async def meter_pick_premises(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(premises_id=int(callback.data.split(":", 1)[1]))
     await state.set_state(MeterFSM.serial)
-    await callback.message.answer("Серийный номер счётчика или пропустите:", reply_markup=_io_kb("dsk:meter_serial"))
+    await edit_or_send(callback.message, "Серийный номер счётчика или пропустите:", reply_markup=_io_kb("dsk:meter_serial"))
     await callback.answer()
 
 
@@ -595,7 +595,7 @@ async def meter_pick_premises(callback: CallbackQuery, state: FSMContext) -> Non
 async def meter_skip_serial(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(serial=None)
     await state.set_state(MeterFSM.label)
-    await callback.message.answer("Метка/название счётчика или пропустите:", reply_markup=_io_kb("dsk:meter_label"))
+    await edit_or_send(callback.message, "Метка/название счётчика или пропустите:", reply_markup=_io_kb("dsk:meter_label"))
     await callback.answer()
 
 
@@ -610,7 +610,7 @@ async def meter_serial(message: Message, state: FSMContext) -> None:
 async def meter_skip_label(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(label=None)
     await state.set_state(MeterFSM.coefficient)
-    await callback.message.answer("Коэффициент (напр. 0.93) или пропустите:", reply_markup=_io_kb("dsk:meter_coeff"))
+    await edit_or_send(callback.message, "Коэффициент (напр. 0.93) или пропустите:", reply_markup=_io_kb("dsk:meter_coeff"))
     await callback.answer()
 
 
@@ -685,10 +685,10 @@ async def landlord_menu(callback: CallbackQuery, state: FSMContext) -> None:
         lid = await _landlord_id(session, callback.from_user.id)
         landlord = await directory_service.get_landlord(session, lid) if lid else None
     if landlord is None:
-        await callback.message.answer("Арендодатель не найден.", reply_markup=back_kb())
+        await edit_or_send(callback.message, "Арендодатель не найден.", reply_markup=back_kb())
         await callback.answer()
         return
-    await callback.message.answer(_landlord_view(landlord), reply_markup=_landlord_kb())
+    await edit_or_send(callback.message, _landlord_view(landlord), reply_markup=_landlord_kb())
     await callback.answer()
 
 
@@ -701,7 +701,7 @@ async def landlord_field_pick(callback: CallbackQuery, state: FSMContext) -> Non
         return
     await state.update_data(landlord_field=field)
     await state.set_state(LandlordFSM.value)
-    await callback.message.answer(f"Введите новое значение — {LANDLORD_FIELDS[field]}:", reply_markup=_io_kb())
+    await edit_or_send(callback.message, f"Введите новое значение — {LANDLORD_FIELDS[field]}:", reply_markup=_io_kb())
     await callback.answer()
 
 
