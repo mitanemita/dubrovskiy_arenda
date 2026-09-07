@@ -13,6 +13,7 @@ from aiogram.types import ErrorEvent
 from app.bot import notifier
 from app.bot.handlers import router
 from app.bot.handlers_admin import router as admin_router
+from app.bot.handlers_admin_tools import router as admin_tools_router
 from app.bot.handlers_directory import router as directory_router
 from app.config import get_settings
 from app.db.base import async_session_factory
@@ -72,6 +73,7 @@ async def run() -> None:
     dp = Dispatcher()
     dp.include_router(router)
     dp.include_router(admin_router)
+    dp.include_router(admin_tools_router)
     dp.include_router(directory_router)
 
     @dp.error()
