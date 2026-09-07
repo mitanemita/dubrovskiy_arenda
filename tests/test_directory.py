@@ -159,6 +159,24 @@ async def test_create_premises_occupied(session, landlord):
     assert p.is_occupied is True
 
 
+async def test_active_occupants(session, landlord):
+    """active_occupants возвращает арендаторов по активным договорам на помещение."""
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад", is_occupied=True)
+    empty = await directory_service.create_premises(session, landlord_id=landlord.id, label="Пустой")
+    t = await directory_service.create_tenant(
+        session, landlord_id=landlord.id, name="ООО Ромашка", type=OrgType.ooo, inn="7100000001"
+    )
+    await session.flush()
+    await directory_service.create_lease(
+        session, tenant_id=t.id, premises_id=p.id, contract_no="1",
+        contract_date=date(2024, 1, 1), rent_amount=Decimal("1000"),
+    )
+    await session.flush()
+    occ = await directory_service.active_occupants(session, landlord.id)
+    assert occ.get(p.id) == ["ООО Ромашка"]
+    assert empty.id not in occ
+
+
 # --- Данные для документов ---
 async def test_create_tenant_with_kpp_and_address(session, landlord):
     """Поля, нужные для УПД: kpp и address."""

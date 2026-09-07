@@ -100,6 +100,20 @@ async def set_premises_status(session: AsyncSession, premises_id: int, is_occupi
     return premises
 
 
+async def active_occupants(session: AsyncSession, landlord_id: int) -> dict[int, list[str]]:
+    """Кто занимает помещения: {premises_id: [имена арендаторов по активным договорам]}."""
+    rows = (await session.execute(
+        select(Lease.premises_id, Tenant.name)
+        .join(Tenant, Tenant.id == Lease.tenant_id)
+        .where(Tenant.landlord_id == landlord_id, Lease.status == LeaseStatus.active)
+        .order_by(Lease.premises_id)
+    )).all()
+    result: dict[int, list[str]] = {}
+    for pid, name in rows:
+        result.setdefault(pid, []).append(name)
+    return result
+
+
 # --- Арендаторы ------------------------------------------------------------
 async def create_tenant(
     session: AsyncSession,

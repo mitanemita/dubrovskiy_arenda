@@ -264,10 +264,10 @@ async def expense_save(message: Message, state: FSMContext) -> None:
 async def adjust_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(AdjustFSM.amount)
-    await edit_or_send(callback.message, 
-        "Корректировка суммы. Введите: <тип> <id> <новая_сумма>\n"
-        "тип: charge (начисление) или expense (расход)\n"
-        "Пример: charge 12 45000",
+    await edit_or_send(callback.message,
+        "Корректировка суммы. Формат: <b>тип id сумма</b>\n"
+        "• тип: charge (начисление) или expense (расход)\n"
+        "• Пример: charge 12 45000",
         reply_markup=cancel_kb(),
     )
     await callback.answer()
@@ -277,7 +277,7 @@ async def adjust_start(callback: CallbackQuery, state: FSMContext) -> None:
 async def adjust_parse(message: Message, state: FSMContext) -> None:
     parts = message.text.split()
     if len(parts) != 3 or parts[0] not in ("charge", "expense"):
-        await message.answer("❌ Формат: <charge|expense> <id> <сумма>. Повторите:", reply_markup=cancel_kb())
+        await message.answer("❌ Формат: тип id сумма (тип: charge или expense). Повторите:", reply_markup=cancel_kb())
         return
     amount = _parse_amount(parts[2])
     if amount is None or amount < 0:

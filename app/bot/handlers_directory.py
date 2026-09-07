@@ -104,49 +104,107 @@ async def directory_menu(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 # --- Помещения -------------------------------------------------------------
+_PREM_PAGE = 10
+_PREM_TITLES = {"free": "🟢 Свободные", "occ": "🔴 Занятые", "all": "📋 Все"}
+
+
 def _status_label(is_occupied: bool) -> str:
     return "🔴 занято" if is_occupied else "🟢 свободно"
 
 
+def _prem_submenu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Свободные", callback_data="premlist:free:0"),
+         InlineKeyboardButton(text="🔴 Занятые", callback_data="premlist:occ:0")],
+        [InlineKeyboardButton(text="📋 Все", callback_data="premlist:all:0")],
+        [InlineKeyboardButton(text="➕ Добавить", callback_data="dadd:premises")],
+        [InlineKeyboardButton(text="◀️ Справочники", callback_data="menu:directory")],
+    ])
+
+
 @router.callback_query(F.data == "dir:premises")
-async def premises_list(callback: CallbackQuery, state: FSMContext) -> None:
+async def premises_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    await edit_or_send(callback.message, "<b>🏢 Помещения</b> — что показать?", reply_markup=_prem_submenu_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("premlist:"))
+async def premises_list(callback: CallbackQuery, state: FSMContext) -> None:
+    """Постраничный список помещений с фильтром (все/свободные/занятые) и занятостью."""
+    await state.clear()
+    _, flt, raw_off = callback.data.split(":")
+    offset = int(raw_off)
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         items = await directory_service.list_premises(session, lid) if lid else []
-    lines = ["<b>🏢 Помещения</b> (нажмите номер для статуса):"]
+        occ = await directory_service.active_occupants(session, lid) if lid else {}
+
+    if flt == "free":
+        items = [p for p in items if not p.is_occupied]
+    elif flt == "occ":
+        items = [p for p in items if p.is_occupied]
+
+    total = len(items)
+    offset = max(0, min(offset, (total - 1) // _PREM_PAGE * _PREM_PAGE if total else 0))
+    page = items[offset:offset + _PREM_PAGE]
+
+    lines = [f"<b>🏢 Помещения — {_PREM_TITLES.get(flt, '')}</b>"]
     if not items:
         lines.append("— пусто")
-    for p in items:
-        area = f", {p.area} м²" if p.area is not None else ""
-        lines.append(f"#{p.id} · {p.label}{area} · {_status_label(p.is_occupied)}")
-    num_buttons = [InlineKeyboardButton(text=f"#{p.id}", callback_data=f"ppick:{p.id}") for p in items]
+    else:
+        pages_total = (total + _PREM_PAGE - 1) // _PREM_PAGE
+        lines.append(f"Стр. {offset // _PREM_PAGE + 1}/{pages_total}. Нажмите # для карточки:")
+        for p in page:
+            area = f", {p.area} м²" if p.area is not None else ""
+            who = ""
+            if p.is_occupied and occ.get(p.id):
+                who = " · " + ", ".join(occ[p.id])
+            lines.append(f"#{p.id} · {p.label}{area} · {_status_label(p.is_occupied)}{who}")
+
+    num_buttons = [InlineKeyboardButton(text=f"#{p.id}", callback_data=f"ppick:{p.id}") for p in page]
     rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
-    rows.append([InlineKeyboardButton(text="➕ Добавить", callback_data="dadd:premises")])
-    rows.append([InlineKeyboardButton(text="◀️ Справочники", callback_data="menu:directory")])
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton(text="◀️ Пред.", callback_data=f"premlist:{flt}:{offset - _PREM_PAGE}"))
+    if offset + _PREM_PAGE < total:
+        nav.append(InlineKeyboardButton(text="След. ▶️", callback_data=f"premlist:{flt}:{offset + _PREM_PAGE}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="dir:premises")])
     await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("ppick:"))
-async def premises_card(callback: CallbackQuery, state: FSMContext) -> None:
-    """Карточка помещения: смена статуса свободно/занято."""
-    await state.clear()
-    pid = int(callback.data.split(":", 1)[1])
+async def _render_premises_card(message, pid: int) -> bool:
+    """Рисует карточку помещения (с занятостью). False — если не найдено."""
     async with async_session_factory() as session:
         p = await session.get(Premises, pid)
+        occ = await directory_service.active_occupants(session, p.landlord_id) if p else {}
     if p is None:
-        await callback.answer("Помещение не найдено", show_alert=True)
-        return
+        return False
     area = f", {p.area} м²" if p.area is not None else ""
     text = f"<b>Помещение #{p.id}</b>\n{p.label}{area}\nСтатус: {_status_label(p.is_occupied)}"
+    if p.is_occupied and occ.get(p.id):
+        text += "\nЗанимает: " + ", ".join(occ[p.id])
     toggle_to = 0 if p.is_occupied else 1
     toggle_txt = "🟢 Пометить свободным" if p.is_occupied else "🔴 Пометить занятым"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=toggle_txt, callback_data=f"pstat:{p.id}:{toggle_to}")],
         [InlineKeyboardButton(text="◀️ К помещениям", callback_data="dir:premises")],
     ])
-    await edit_or_send(callback.message, text, reply_markup=kb)
+    await edit_or_send(message, text, reply_markup=kb)
+    return True
+
+
+@router.callback_query(F.data.startswith("ppick:"))
+async def premises_card(callback: CallbackQuery, state: FSMContext) -> None:
+    """Карточка помещения: смена статуса свободно/занято, кто занимает."""
+    await state.clear()
+    pid = int(callback.data.split(":", 1)[1])
+    if not await _render_premises_card(callback.message, pid):
+        await callback.answer("Помещение не найдено", show_alert=True)
+        return
     await callback.answer()
 
 
@@ -157,7 +215,7 @@ async def premises_set_status(callback: CallbackQuery, state: FSMContext) -> Non
         await directory_service.set_premises_status(session, int(raw_id), bool(int(raw_val)))
         await session.commit()
     await callback.answer("Статус обновлён")
-    await premises_list(callback, state)
+    await _render_premises_card(callback.message, int(raw_id))
 
 
 @router.callback_query(F.data == "dadd:premises")
