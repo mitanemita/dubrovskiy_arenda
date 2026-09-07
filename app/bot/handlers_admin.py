@@ -1341,13 +1341,23 @@ async def report_electricity(callback: CallbackQuery, state: FSMContext) -> None
     period = _period_from_code(code)
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
-        elec = await report_service.electricity_summary(session, lid, period) if lid else []
-    # Показываем только помещения с реальным расходом/начислением
-    elec = [r for r in elec if r["consumption_kwh"] > 0 or r["amount"] > 0]
+        rows = await report_service.electricity_status(session, lid, period) if lid else []
+
     lines = [f"<b>⚡ Электричество — {_period_ru(period)}</b>"]
-    lines += [
-        f"• {r['premises']}: {r['consumption_kwh']} кВт·ч = {r['amount']} ₽" for r in elec
-    ] or ["— нет данных"]
+    if not rows:
+        lines.append("— нет помещений со счётчиками")
+    no_reading = [r["premises"] for r in rows if not r["has_reading"]]
+    with_reading = [r for r in rows if r["has_reading"]]
+    for r in with_reading:
+        if r["charged"] <= 0:
+            mark, tail = "•", "начисление не сформировано"
+        elif r["is_paid"]:
+            mark, tail = "✅", f"{r['charged']} ₽ — оплачено"
+        else:
+            mark, tail = "❌", f"{r['charged']} ₽ — долг {r['debt']} ₽"
+        lines.append(f"{mark} {r['premises']}: {r['consumption']} кВт·ч · {tail}")
+    if no_reading:
+        lines.append("\n⏳ <b>Нет замера за месяц:</b> " + ", ".join(no_reading))
     await edit_or_send(callback.message, "\n".join(lines), reply_markup=_report_back_kb(code))
     await callback.answer()
 

@@ -123,6 +123,51 @@ async def payments_by_premises(session: AsyncSession, landlord_id: int) -> list[
     return [{"premises": k, "confirmed_total": v} for k, v in sorted(totals.items())]
 
 
+async def electricity_status(session: AsyncSession, landlord_id: int, period: date) -> list[dict]:
+    """По каждому помещению со счётчиком: получен ли замер, расход, начислено,
+    оплачено/долг по электричеству за период.
+
+    Строки: {premises, has_reading, consumption, charged, paid, debt, is_paid}.
+    """
+    period = period_start(period)
+    premises = (await session.execute(
+        select(Premises.id, Premises.label)
+        .join(Meter, Meter.premises_id == Premises.id)
+        .where(Premises.landlord_id == landlord_id)
+        .distinct().order_by(Premises.label)
+    )).all()
+
+    rows: list[dict] = []
+    for pid, label in premises:
+        cons = (await session.execute(
+            select(func.coalesce(func.sum(MeterReading.consumption), 0))
+            .join(Meter, Meter.id == MeterReading.meter_id)
+            .where(Meter.premises_id == pid, MeterReading.period == period)
+        )).scalar_one()
+        n_readings = (await session.execute(
+            select(func.count()).select_from(MeterReading)
+            .join(Meter, Meter.id == MeterReading.meter_id)
+            .where(Meter.premises_id == pid, MeterReading.period == period)
+        )).scalar_one()
+        ch = (await session.execute(
+            select(func.coalesce(func.sum(Charge.amount), 0), func.coalesce(func.sum(Charge.paid_amount), 0))
+            .join(Lease, Lease.id == Charge.lease_id)
+            .where(Lease.premises_id == pid, Charge.type == ChargeType.electricity, Charge.period == period)
+        )).one()
+        charged, paid = Decimal(str(ch[0])), Decimal(str(ch[1]))
+        debt = charged - paid
+        rows.append({
+            "premises": label,
+            "has_reading": n_readings > 0,
+            "consumption": Decimal(str(cons)),
+            "charged": charged,
+            "paid": paid,
+            "debt": debt if debt > 0 else Decimal("0"),
+            "is_paid": charged > 0 and debt <= 0,
+        })
+    return rows
+
+
 async def electricity_summary(session: AsyncSession, landlord_id: int, period: date) -> list[dict]:
     """Расход и начисление по электричеству за период в разрезе помещений."""
     period = period_start(period)

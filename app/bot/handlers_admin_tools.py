@@ -101,64 +101,82 @@ async def admin_wipe_confirm(callback: CallbackQuery, state: FSMContext) -> None
     await callback.answer()
 
 
-async def _send_test_document(callback: CallbackQuery, kind: str) -> None:
-    """Формирует документ по первому активному договору и ОТПРАВЛЯЕТ его на почту арендатора.
-
-    Проверка работоспособности SMTP: письмо с формальным текстом и PDF-вложением.
-    """
+async def _show_lease_picker(callback: CallbackQuery, kind: str) -> None:
+    """Список активных договоров для выбора получателя письма (kind: upd|receipt)."""
     async with async_session_factory() as session:
         if not await _is_allowed(session, callback.from_user.id):
             await callback.answer("Доступ запрещён", show_alert=True)
             return
         lid = await _landlord_id(session, callback.from_user.id)
-        lease_id = await _first_active_lease_id(session, lid) if lid else None
-        if lease_id is None:
-            await edit_or_send(callback.message,
-                "Нет активного договора. Сначала «🧪 Заполнить тестовыми данными».",
-                reply_markup=back_kb())
-            await callback.answer()
-            return
-        period = period_start(date.today())
-        try:
-            if kind == "upd":
-                pkg = await document_service.upd_email_package(session, lease_id, period, ChargeType.rent)
-            else:
-                pkg = await document_service.receipt_email_package(session, lease_id, period)
-        except Exception as exc:  # noqa: BLE001 — показываем причину оператору
-            logger.exception("Ошибка генерации тестового документа")
-            await edit_or_send(callback.message, f"❌ Ошибка генерации документа: {exc}", reply_markup=back_kb())
-            await callback.answer()
-            return
-
-    if not pkg["to"]:
+        rows = (await session.execute(
+            select(Lease.id, Lease.contract_no, Tenant.name, Tenant.email)
+            .join(Tenant, Tenant.id == Lease.tenant_id)
+            .where(Tenant.landlord_id == lid, Lease.status == LeaseStatus.active)
+            .order_by(Tenant.name)
+        )).all() if lid else []
+    if not rows:
         await edit_or_send(callback.message,
-            "У арендатора не указан email. Добавьте его в карточке арендатора.",
-            reply_markup=back_kb())
+            "Нет активного договора. Сначала «🧪 Заполнить тестовыми данными».", reply_markup=back_kb())
         await callback.answer()
         return
-
-    try:
-        await send_email(pkg["to"], pkg["subject"], pkg["body"], attachment=pkg["pdf"], filename=pkg["filename"])
-    except Exception as exc:  # noqa: BLE001 — показываем реальную причину (проверка SMTP)
-        logger.exception("Ошибка отправки письма")
-        await edit_or_send(callback.message, f"❌ Не отправлено: {exc}", reply_markup=back_kb())
-        await callback.answer()
-        return
-    await edit_or_send(callback.message,
-        f"✅ Отправлено на {pkg['to']}\nТема: {pkg['subject']}", reply_markup=back_kb())
-    await callback.answer("Письмо отправлено")
+    doc_name = "УПД" if kind == "upd" else "квитанцию"
+    lines = [f"<b>Кому отправить {doc_name}?</b>"]
+    kb_rows = []
+    for lease_id, contract, name, email in rows:
+        mail = email or "нет email"
+        lines.append(f"• {name} · №{contract} · {mail}")
+        kb_rows.append([InlineKeyboardButton(text=f"{name} (№{contract})", callback_data=f"adm:mail:{kind}:{lease_id}")])
+    kb_rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="nav:home")])
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await callback.answer()
 
 
 @router.callback_query(F.data == "adm:doc_upd")
 async def admin_doc_upd(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await _send_test_document(callback, "upd")
+    await _show_lease_picker(callback, "upd")
 
 
 @router.callback_query(F.data == "adm:doc_receipt")
 async def admin_doc_receipt(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await _send_test_document(callback, "receipt")
+    await _show_lease_picker(callback, "receipt")
+
+
+@router.callback_query(F.data.startswith("adm:mail:"))
+async def admin_send_mail(callback: CallbackQuery, state: FSMContext) -> None:
+    """Отправка выбранного документа выбранному арендатору на почту."""
+    await state.clear()
+    # Отвечаем на callback СРАЗУ: SMTP-отправка долгая, иначе query протухает.
+    await callback.answer("Отправляю…")
+    _, _, kind, raw_id = callback.data.split(":")
+    lease_id = int(raw_id)
+    await edit_or_send(callback.message, "⏳ Формирую документ и отправляю письмо…")
+    period = period_start(date.today())
+    async with async_session_factory() as session:
+        if not await _is_allowed(session, callback.from_user.id):
+            return
+        try:
+            if kind == "upd":
+                pkg = await document_service.upd_email_package(session, lease_id, period, ChargeType.rent)
+            else:
+                pkg = await document_service.receipt_email_package(session, lease_id, period)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Ошибка генерации документа")
+            await edit_or_send(callback.message, f"❌ Ошибка генерации документа: {exc}", reply_markup=back_kb())
+            return
+    if not pkg["to"]:
+        await edit_or_send(callback.message,
+            "У арендатора не указан email. Укажите его в карточке арендатора.", reply_markup=back_kb())
+        return
+    try:
+        await send_email(pkg["to"], pkg["subject"], pkg["body"], attachment=pkg["pdf"], filename=pkg["filename"])
+    except Exception as exc:  # noqa: BLE001 — реальная причина (проверка SMTP)
+        logger.exception("Ошибка отправки письма")
+        await edit_or_send(callback.message, f"❌ Не отправлено на {pkg['to']}:\n{exc}", reply_markup=back_kb())
+        return
+    await edit_or_send(callback.message,
+        f"✅ Отправлено на {pkg['to']}\nТема: {pkg['subject']}", reply_markup=back_kb())
 
 
 @router.callback_query(F.data == "adm:wipe")
