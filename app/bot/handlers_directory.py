@@ -832,6 +832,8 @@ async def lease_payment_day(message: Message, state: FSMContext) -> None:
 async def _lease_finish(message: Message, tg_id: int, state: FSMContext, *, payment_day: int) -> None:
     from datetime import date as _date
 
+    from app.services import billing_service
+
     data = await state.get_data()
     async with async_session_factory() as session:
         try:
@@ -846,6 +848,8 @@ async def _lease_finish(message: Message, tg_id: int, state: FSMContext, *, paym
             )
             await session.flush()
             lease_id = lease.id
+            # Сразу начисляем аренду за текущий месяц, чтобы договор был виден в отчёте.
+            await billing_service.create_rent_charge(session, lease, _date.today())
             await session.commit()
         except ValueError as exc:
             await session.rollback()
@@ -854,7 +858,7 @@ async def _lease_finish(message: Message, tg_id: int, state: FSMContext, *, paym
             return
     await state.clear()
     await message.answer(
-        f"✅ Договор #{lease_id} №{data['contract_no']} создан (день оплаты {payment_day}).",
+        f"✅ Договор №{data['contract_no']} создан (день оплаты {payment_day}). Аренда за текущий месяц начислена.",
         reply_markup=_list_kb("dadd:leases"),
     )
 

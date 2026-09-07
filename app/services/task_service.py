@@ -48,6 +48,7 @@ async def create_task(
     description: str | None = None,
     created_by_id: int | None = None,
     due_date: date | None = None,
+    assignee: str | None = None,
     today: date | None = None,
 ) -> Task:
     """Создаёт задачу. Срок — из приоритета, либо явный (due_date, «на число»)."""
@@ -59,6 +60,7 @@ async def create_task(
         due_date=due_date or due_from_priority(priority, today),
         description=description,
         created_by_id=created_by_id,
+        assignee=assignee,
     )
     session.add(task)
     return task
@@ -168,8 +170,21 @@ async def list_tasks(session: AsyncSession, landlord_id: int, *, include_done: b
     return tasks
 
 
+async def list_done_tasks(session: AsyncSession, landlord_id: int) -> list[Task]:
+    """Выполненные задачи (хранятся, пока их не удалят вручную)."""
+    result = await session.execute(
+        select(Task).where(Task.landlord_id == landlord_id, Task.status == TaskStatus.done)
+        .order_by(Task.updated_at.desc())
+    )
+    return list(result.scalars().all())
+
+
 async def get_task(session: AsyncSession, task_id: int) -> Task | None:
     return await session.get(Task, task_id)
+
+
+# Значение-«очистка» адресата (задача становится общей)
+_UNSET = object()
 
 
 async def update_task(
@@ -178,8 +193,12 @@ async def update_task(
     *,
     title: str | None = None,
     priority: TaskPriority | None = None,
+    assignee=_UNSET,
 ) -> Task | None:
-    """Редактирование задачи. При смене приоритета срок и напоминания пересчитываются."""
+    """Редактирование задачи. При смене приоритета срок и напоминания пересчитываются.
+
+    assignee: строка (кому), None (сделать общей) или _UNSET (не менять).
+    """
     task = await session.get(Task, task_id)
     if task is None:
         return None
@@ -190,6 +209,8 @@ async def update_task(
         task.due_date = due_from_priority(priority, task.created_at.date())
         task.remind_pre_sent = False
         task.remind_due_sent = False
+    if assignee is not _UNSET:
+        task.assignee = assignee
     return task
 
 

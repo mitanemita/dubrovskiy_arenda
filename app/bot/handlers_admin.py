@@ -113,12 +113,34 @@ class ReadingFSM(StatesGroup):
 
 class TaskFSM(StatesGroup):
     add_title = State()
+    add_assignee = State()
+    add_assignee_text = State()
     add_priority = State()
     add_date = State()
     bulk_titles = State()
     edit_title = State()
     edit_priority = State()
     edit_date = State()
+    edit_assignee_text = State()
+
+
+# Предустановленные адресаты задач
+_ASSIGNEES = {"mitya": "Митя", "alexey": "Алексей"}
+
+
+def _assignee_label(assignee: str | None) -> str:
+    return f"👤 {assignee}" if assignee else "👥 общая"
+
+
+def _assignee_kb(add_cb_prefix: str) -> InlineKeyboardMarkup:
+    """Клавиатура выбора адресата. Кнопки формируют callback f'{prefix}:{code}'."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Митя", callback_data=f"{add_cb_prefix}:mitya"),
+         InlineKeyboardButton(text="👤 Алексей", callback_data=f"{add_cb_prefix}:alexey")],
+        [InlineKeyboardButton(text="✍️ Ввести имя", callback_data=f"{add_cb_prefix}:text"),
+         InlineKeyboardButton(text="👥 Общая", callback_data=f"{add_cb_prefix}:none")],
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")],
+    ])
 
 
 class PayFSM(StatesGroup):
@@ -390,10 +412,24 @@ async def readings_menu(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("mr:"))
 async def reading_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    from app.db.models import MeterReading
     meter_id = int(callback.data.split(":", 1)[1])
     await state.update_data(meter_id=meter_id)
     await state.set_state(ReadingFSM.value)
-    await edit_or_send(callback.message, 
+    async with async_session_factory() as session:
+        last = (await session.execute(
+            select(MeterReading).where(MeterReading.meter_id == meter_id)
+            .order_by(MeterReading.period.desc()).limit(1)
+        )).scalars().first()
+    if last is not None:
+        current = (
+            f"Последнее показание: <b>{last.curr_value}</b> за {last.period.strftime('%m.%Y')} "
+            f"(расход {last.consumption} кВт·ч).\n"
+        )
+    else:
+        current = "Показаний ещё нет.\n"
+    await edit_or_send(callback.message,
+        current +
         "Введите период и текущие показания в формате: ММ.ГГГГ значение\n"
         "Пример: 04.2026 15350",
         reply_markup=cancel_kb(),
@@ -467,6 +503,7 @@ def _tasks_menu_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="✏️ Редактировать", callback_data="tasks:edit")],
         [InlineKeyboardButton(text="➕ Задача", callback_data="task_add"),
          InlineKeyboardButton(text="➕ Списком", callback_data="task_bulk")],
+        [InlineKeyboardButton(text="✅ Выполненные", callback_data="tasks:done")],
         [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
     ])
 
@@ -493,7 +530,7 @@ def _due_human(due) -> str:
 def _task_line(idx: int, t) -> str:
     due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
     icon = _PRIORITY_ICON.get(t.priority, "")
-    return f"{idx}. {icon} {t.title} · до {due} ({_due_human(t.due_date)})"
+    return f"{idx}. {icon} {t.title} · {_assignee_label(t.assignee)} · до {due} ({_due_human(t.due_date)})"
 
 
 @router.callback_query(F.data == "menu:tasks")
@@ -583,8 +620,9 @@ async def task_pick(callback: CallbackQuery, state: FSMContext) -> None:
         return
     due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
     text = (
-        f"<b>Задача #{t.id}</b>\n"
+        f"<b>Задача</b>\n"
         f"{task_service.PRIORITY_LABEL.get(t.priority, '')} {t.title}\n"
+        f"Адресат: {_assignee_label(t.assignee)}\n"
         f"Срок: {due} · статус: {t.status.value}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -592,6 +630,7 @@ async def task_pick(callback: CallbackQuery, state: FSMContext) -> None:
          InlineKeyboardButton(text="🗑 Удалить", callback_data=f"taskdel:{t.id}")],
         [InlineKeyboardButton(text="🏷 Категория", callback_data=f"taskcat:{t.id}"),
          InlineKeyboardButton(text="📅 Дата", callback_data=f"taskdate:{t.id}")],
+        [InlineKeyboardButton(text="👤 Адресат", callback_data=f"taskasg:{t.id}")],
         [InlineKeyboardButton(text="◀️ К списку", callback_data="tasks:edit")],
     ])
     await edit_or_send(callback.message, text, reply_markup=kb)
@@ -614,11 +653,41 @@ async def task_add_title(message: Message, state: FSMContext) -> None:
         await message.answer("❌ Текст задачи не может быть пустым. Повторите:", reply_markup=cancel_kb())
         return
     await state.update_data(title=title)
-    await state.set_state(TaskFSM.add_priority)
+    await state.set_state(TaskFSM.add_assignee)
+    await message.answer("Кому поставить задачу?", reply_markup=_assignee_kb("asg"))
+
+
+async def _ask_priority(message: Message) -> None:
     await message.answer(
         "Выберите приоритет (задаёт срок) или «На дату»:",
         reply_markup=_priority_kb("add", with_date=True),
     )
+
+
+@router.callback_query(TaskFSM.add_assignee, F.data.startswith("asg:"))
+async def task_add_assignee(callback: CallbackQuery, state: FSMContext) -> None:
+    code = callback.data.split(":", 1)[1]
+    if code == "text":
+        await state.set_state(TaskFSM.add_assignee_text)
+        await edit_or_send(callback.message, "Введите имя адресата:", reply_markup=cancel_kb())
+        await callback.answer()
+        return
+    assignee = None if code == "none" else _ASSIGNEES.get(code)
+    await state.update_data(assignee=assignee)
+    await state.set_state(TaskFSM.add_priority)
+    await _ask_priority(callback.message)
+    await callback.answer()
+
+
+@router.message(TaskFSM.add_assignee_text)
+async def task_add_assignee_text(message: Message, state: FSMContext) -> None:
+    name = message.text.strip()
+    if not name:
+        await message.answer("❌ Имя не может быть пустым. Повторите:", reply_markup=cancel_kb())
+        return
+    await state.update_data(assignee=name)
+    await state.set_state(TaskFSM.add_priority)
+    await _ask_priority(message)
 
 
 async def _create_task_and_reply(callback_or_msg, state, *, priority, due_date, user_tg_id):
@@ -630,6 +699,7 @@ async def _create_task_and_reply(callback_or_msg, state, *, priority, due_date, 
         task = await task_service.create_task(
             session, landlord_id=lid, title=data["title"], priority=priority,
             due_date=due_date, created_by_id=user.id if user else None,
+            assignee=data.get("assignee"),
         )
         await session.flush()
         due_str = task.due_date.strftime("%d.%m.%Y")
@@ -836,6 +906,99 @@ async def task_done(callback: CallbackQuery) -> None:
         await edit_or_send(callback.message, "✅ Задача отмечена выполненной.", reply_markup=_back)
 
 
+# --- Редактирование адресата задачи ---------------------------------------
+@router.callback_query(F.data.startswith("taskasg:"))
+async def task_edit_assignee_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    tid = int(callback.data.split(":", 1)[1])
+    await edit_or_send(callback.message, "Кому адресовать задачу?", reply_markup=_assignee_kb(f"easg:{tid}"))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("easg:"))
+async def task_edit_assignee_set(callback: CallbackQuery, state: FSMContext) -> None:
+    _, raw_tid, code = callback.data.split(":")
+    tid = int(raw_tid)
+    if code == "text":
+        await state.update_data(edit_id=tid)
+        await state.set_state(TaskFSM.edit_assignee_text)
+        await edit_or_send(callback.message, "Введите имя адресата:", reply_markup=cancel_kb())
+        await callback.answer()
+        return
+    assignee = None if code == "none" else _ASSIGNEES.get(code)
+    async with async_session_factory() as session:
+        await task_service.update_task(session, tid, assignee=assignee)
+        await session.commit()
+    await callback.answer("Адресат обновлён")
+    await _open_task_card(callback.message, tid)
+
+
+@router.message(TaskFSM.edit_assignee_text)
+async def task_edit_assignee_text(message: Message, state: FSMContext) -> None:
+    name = message.text.strip()
+    if not name:
+        await message.answer("❌ Имя не может быть пустым. Повторите:", reply_markup=cancel_kb())
+        return
+    data = await state.get_data()
+    async with async_session_factory() as session:
+        await task_service.update_task(session, data["edit_id"], assignee=name)
+        await session.commit()
+    await state.clear()
+    await _open_task_card(message, data["edit_id"])
+
+
+async def _open_task_card(message: Message, task_id: int) -> None:
+    """Перерисовывает карточку задачи (после правки адресата)."""
+    async with async_session_factory() as session:
+        t = await task_service.get_task(session, task_id)
+    if t is None:
+        await message.answer("Задача не найдена.", reply_markup=main_menu_kb())
+        return
+    due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
+    text = (
+        f"<b>Задача</b>\n{task_service.PRIORITY_LABEL.get(t.priority, '')} {t.title}\n"
+        f"Адресат: {_assignee_label(t.assignee)}\nСрок: {due} · статус: {t.status.value}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"taskdone:{t.id}"),
+         InlineKeyboardButton(text="🗑 Удалить", callback_data=f"taskdel:{t.id}")],
+        [InlineKeyboardButton(text="🏷 Категория", callback_data=f"taskcat:{t.id}"),
+         InlineKeyboardButton(text="📅 Дата", callback_data=f"taskdate:{t.id}")],
+        [InlineKeyboardButton(text="👤 Адресат", callback_data=f"taskasg:{t.id}")],
+        [InlineKeyboardButton(text="◀️ К списку", callback_data="tasks:edit")],
+    ])
+    await edit_or_send(message, text, reply_markup=kb)
+
+
+# --- Выполненные задачи ----------------------------------------------------
+@router.callback_query(F.data == "tasks:done")
+async def tasks_done_list(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        tasks = await task_service.list_done_tasks(session, lid) if lid else []
+    lines = ["<b>✅ Выполненные задачи</b> (хранятся до удаления; нажмите № чтобы удалить):"]
+    if not tasks:
+        lines.append("— пусто")
+    for i, t in enumerate(tasks, start=1):
+        lines.append(f"{i}. {t.title} · {_assignee_label(t.assignee)}")
+    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"tddel:{t.id}") for i, t in enumerate(tasks, start=1)]
+    rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    rows.append([InlineKeyboardButton(text="◀️ К задачам", callback_data="menu:tasks")])
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tddel:"))
+async def task_done_delete(callback: CallbackQuery, state: FSMContext) -> None:
+    task_id = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        await task_service.delete_task(session, task_id)
+        await session.commit()
+    await callback.answer("Удалена")
+    await tasks_done_list(callback, state)
+
+
 # --- Ручная отметка оплаты от арендатора -----------------------------------
 @router.callback_query(F.data == "menu:pay")
 async def payment_manual_menu(callback: CallbackQuery, state: FSMContext) -> None:
@@ -994,41 +1157,141 @@ async def payment_manual_save(message: Message, state: FSMContext) -> None:
 
 
 # --- Отчёты ----------------------------------------------------------------
+_MONTHS_RU = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+              "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+
+
+def _period_code(period: date) -> str:
+    return f"{period.year:04d}{period.month:02d}"
+
+
+def _period_from_code(code: str) -> date:
+    return date(int(code[:4]), int(code[4:6]), 1)
+
+
+def _period_ru(period: date) -> str:
+    return f"{_MONTHS_RU[period.month]} {period.year}"
+
+
+def _report_nav_kb(code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 По помещениям", callback_data=f"rep:prem:{code}"),
+         InlineKeyboardButton(text="⚡ Электричество", callback_data=f"rep:elec:{code}")],
+        [InlineKeyboardButton(text="🔴 Должники", callback_data=f"rep:debt:{code}"),
+         InlineKeyboardButton(text="📅 Другой месяц", callback_data="rep:years")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
+    ])
+
+
+def _report_back_kb(code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К сводке", callback_data=f"rep:main:{code}")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
+    ])
+
+
 @router.callback_query(F.data == "menu:reports")
 async def reports(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    await _show_report_main(callback, _period_code(date.today()))
+
+
+@router.callback_query(F.data.startswith("rep:main:"))
+async def report_main(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _show_report_main(callback, callback.data.split(":")[2])
+
+
+async def _show_report_main(callback: CallbackQuery, code: str) -> None:
+    period = _period_from_code(code)
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         if lid is None:
             await edit_or_send(callback.message, "Нет данных.", reply_markup=back_kb())
             await callback.answer()
             return
-        status = await report_service.tenant_payment_status(session, lid, date.today())
-        by_prem = await report_service.payments_by_premises(session, lid)
-        elec = await report_service.electricity_summary(session, lid, date.today())
+        s = await report_service.monthly_summary(session, lid, period)
+    lines = [
+        f"<b>📊 Сводка за {_period_ru(period)}</b>",
+        f"💰 Доход (оплачено): {s['income']} ₽",
+        f"💸 Расход: {s['expense']} ₽",
+        f"⚡ Электричество (начислено): {s['electricity']} ₽",
+        f"🔴 Должников: {s['debtors']} из {s['leases']}" + (f" · долг {s['total_debt']} ₽" if s['total_debt'] > 0 else ""),
+    ]
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_report_nav_kb(code))
+    await callback.answer()
 
-    lines = [f"<b>💳 Оплата за текущий месяц: {status['paid']} из {status['total']} договоров</b>"]
-    if not status["rows"]:
-        lines.append("— активных договоров нет")
-    for r in status["rows"]:
-        if not r["has_charges"]:
-            mark = "➖"
-            tail = "нет начислений"
-        elif r["is_paid"]:
-            mark = "✅"
-            tail = f"оплачено {r['paid']} ₽"
-        else:
-            mark = "❌"
-            tail = f"долг {r['debt']} ₽ (оплачено {r['paid']} из {r['charged']} ₽)"
-        lines.append(f"{mark} {r['tenant']} · {r['premises']}: {tail}")
-    if status["total_debt"] > 0:
-        lines.append(f"<b>Итого долг: {status['total_debt']} ₽</b>")
 
-    lines.append("\n<b>Подтверждённые платежи по помещениям:</b>")
-    lines += [f"• {r['premises']}: {r['confirmed_total']} ₽" for r in by_prem] or ["— нет"]
-    lines.append("\n<b>Электричество за текущий месяц:</b>")
+@router.callback_query(F.data.startswith("rep:prem:"))
+async def report_premises(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    code = callback.data.split(":")[2]
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        by_prem = await report_service.payments_by_premises(session, lid) if lid else []
+    lines = [f"<b>🏠 Платежи по помещениям — {_period_ru(_period_from_code(code))}</b>"]
+    lines += [f"• {r['premises']}: {r['confirmed_total']} ₽" for r in by_prem] or ["— нет подтверждённых платежей"]
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_report_back_kb(code))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rep:elec:"))
+async def report_electricity(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    code = callback.data.split(":")[2]
+    period = _period_from_code(code)
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        elec = await report_service.electricity_summary(session, lid, period) if lid else []
+    # Показываем только помещения с реальным расходом/начислением
+    elec = [r for r in elec if r["consumption_kwh"] > 0 or r["amount"] > 0]
+    lines = [f"<b>⚡ Электричество — {_period_ru(period)}</b>"]
     lines += [
         f"• {r['premises']}: {r['consumption_kwh']} кВт·ч = {r['amount']} ₽" for r in elec
-    ] or ["— нет"]
-    await edit_or_send(callback.message, "\n".join(lines), reply_markup=back_kb())
+    ] or ["— нет данных"]
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_report_back_kb(code))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rep:debt:"))
+async def report_debtors(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    code = callback.data.split(":")[2]
+    period = _period_from_code(code)
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        status = await report_service.tenant_payment_status(session, lid, period) if lid else {"rows": [], "total_debt": 0}
+    debtors = [r for r in status["rows"] if r["debt"] > 0]
+    lines = [f"<b>🔴 Должники — {_period_ru(period)}</b>"]
+    if not debtors:
+        lines.append("— нет должников 🎉")
+    for r in debtors:
+        phone = f" · 📞 {r['phone']}" if r.get("phone") else ""
+        detail = f"\n   не оплачено: {r['unpaid_detail']}" if r.get("unpaid_detail") else ""
+        lines.append(f"❌ {r['tenant']} · {r['premises']}: долг {r['debt']} ₽{phone}{detail}")
+    if status["total_debt"] > 0:
+        lines.append(f"\n<b>Итого долг: {status['total_debt']} ₽</b>")
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_report_back_kb(code))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rep:years")
+async def report_pick_year(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    cur = date.today().year
+    years = [cur - 2, cur - 1, cur, cur + 1]
+    rows = [[InlineKeyboardButton(text=str(y), callback_data=f"rep:months:{y}") for y in years]]
+    rows.append([InlineKeyboardButton(text="◀️ К сводке", callback_data=f"rep:main:{_period_code(date.today())}")])
+    await edit_or_send(callback.message, "Выберите год:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rep:months:"))
+async def report_pick_month(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    year = int(callback.data.split(":")[2])
+    buttons = [InlineKeyboardButton(text=_MONTHS_RU[m][:3], callback_data=f"rep:main:{year:04d}{m:02d}") for m in range(1, 13)]
+    rows = [buttons[i:i + 4] for i in range(0, 12, 4)]
+    rows.append([InlineKeyboardButton(text="◀️ Год", callback_data="rep:years")])
+    await edit_or_send(callback.message, f"Выберите месяц {year}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()

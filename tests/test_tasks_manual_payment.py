@@ -216,3 +216,34 @@ async def test_manual_payment_full(session, lease):
     assert rent.status == ChargeStatus.paid
     # арендатор уведомлён
     assert "payment_confirmed" in (await session.execute(select(Notification.type))).scalars().all()
+
+
+# --- Адресат и выполненные задачи ---
+async def test_task_assignee_create_update(session, landlord):
+    t = await task_service.create_task(session, landlord_id=landlord.id, title="Позвонить", assignee="Митя")
+    await session.flush()
+    assert t.assignee == "Митя"
+    await task_service.update_task(session, t.id, assignee="Алексей")
+    await session.flush()
+    assert t.assignee == "Алексей"
+    # сделать общей (None)
+    await task_service.update_task(session, t.id, assignee=None)
+    await session.flush()
+    assert t.assignee is None
+    # без указания assignee поле не меняется
+    await task_service.update_task(session, t.id, title="Позвонить снова")
+    await session.flush()
+    assert t.assignee is None and t.title == "Позвонить снова"
+
+
+async def test_list_done_tasks(session, landlord):
+    a = await task_service.create_task(session, landlord_id=landlord.id, title="A")
+    b = await task_service.create_task(session, landlord_id=landlord.id, title="B")
+    await session.flush()
+    await task_service.mark_done(session, a.id)
+    await session.flush()
+    done = await task_service.list_done_tasks(session, landlord.id)
+    assert [t.title for t in done] == ["A"]
+    # открытые не попадают в выполненные
+    open_tasks = await task_service.list_tasks(session, landlord.id)
+    assert {t.title for t in open_tasks} == {"B"}

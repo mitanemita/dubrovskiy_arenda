@@ -71,7 +71,7 @@ async def wipe_business_data(session: AsyncSession, landlord_id: int) -> dict[st
         await _del(delete(Lease).where(Lease.id.in_(lease_ids)), "leases")
     await _del(delete(Tenant).where(Tenant.landlord_id == landlord_id), "tenants")
     await _del(delete(Premises).where(Premises.landlord_id == landlord_id), "premises")
-    await _del(delete(Task).where(Task.landlord_id == landlord_id), "tasks")
+    # Задачи НЕ трогаем — это рабочие данные пользователя.
     await _del(delete(Expense).where(Expense.landlord_id == landlord_id), "expenses")
     await _del(delete(Adjustment).where(Adjustment.landlord_id == landlord_id), "adjustments")
     await _del(delete(Document).where(Document.landlord_id == landlord_id), "documents")
@@ -117,7 +117,7 @@ async def seed_test_data(session: AsyncSession, landlord_id: int) -> dict[str, i
                       area=Decimal("120.00"), is_occupied=True)
     prem_b = Premises(landlord_id=landlord_id, label="Помещение Б2", address="г. Тула, ул. Демонстрационная, 3",
                       area=Decimal("55.50"), is_occupied=True)
-    prem_c = Premises(landlord_id=landlord_id, label="Помещение В3 (свободно)", address="г. Тула, ул. Демонстрационная, 5",
+    prem_c = Premises(landlord_id=landlord_id, label="Помещение В3", address="г. Тула, ул. Демонстрационная, 5",
                       area=Decimal("30.00"), is_occupied=False)
     session.add_all([prem_a, prem_b, prem_c])
     await session.flush()
@@ -175,14 +175,8 @@ async def seed_test_data(session: AsyncSession, landlord_id: int) -> dict[str, i
                 amount=Decimal("12000.00"), period=period, description="Демо: ремонт"),
     ]
     session.add_all(expenses)
-
-    tasks = [
-        Task(landlord_id=landlord_id, title="Демо: проверить показания счётчика", due_date=today + timedelta(days=3)),
-        Task(landlord_id=landlord_id, title="Демо: продлить договор 17/2026-АР", due_date=today + timedelta(days=14)),
-        Task(landlord_id=landlord_id, title="Демо: просроченная задача", due_date=today - timedelta(days=2)),
-    ]
-    session.add_all(tasks)
     await session.flush()
 
+    # Задачи НЕ создаём в демо-данных — это рабочие данные пользователя.
     return {"premises": 3, "tenants": 2, "leases": 2, "meters": 2, "readings": 2,
-            "charges": 4, "payments": 2, "expenses": len(expenses), "tasks": len(tasks)}
+            "charges": 4, "payments": 2, "expenses": len(expenses)}

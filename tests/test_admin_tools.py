@@ -43,6 +43,10 @@ async def test_seed_then_wipe(session, landlord):
     elec = await report_service.electricity_summary(session, landlord.id, date.today())
     assert len(elec) >= 2 and all(e["consumption_kwh"] > 0 and e["amount"] > 0 for e in elec)
 
+    # задачи не относятся к seed/wipe (рабочие данные): своя задача переживает очистку
+    session.add(Task(landlord_id=landlord.id, title="Рабочая задача"))
+    await session.flush()
+
     # очистка удаляет всё бизнес-данное, арендодатель остаётся
     wiped = await admin_service.wipe_business_data(session, landlord.id)
     await session.flush()
@@ -52,8 +56,8 @@ async def test_seed_then_wipe(session, landlord):
     assert await _count(session, Tenant) == 0
     assert await _count(session, Lease) == 0
     assert await _count(session, Meter) == 0
-    assert await _count(session, Task) == 0
     assert await _count(session, Landlord) == 1
+    assert await _count(session, Task) == 1  # задача сохранилась
     # отчёты снова пустые
     assert await report_service.payments_by_premises(session, landlord.id) == []
 

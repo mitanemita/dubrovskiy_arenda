@@ -21,7 +21,7 @@ router = Router()
 
 # Метка версии интерфейса бота. Видна в /start и /version — по ней сразу понятно,
 # запущена ли на сервере новая сборка (инлайн-меню) или старый образ.
-BOT_UI_VERSION = "inline-menu-2026.09.07.10"
+BOT_UI_VERSION = "inline-menu-2026.09.07.11"
 
 
 async def _is_allowed(session, tg_id: int) -> bool:
