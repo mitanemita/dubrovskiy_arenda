@@ -901,7 +901,6 @@ async def _task_title(task_id: int) -> str:
     return t.title if t else f"#{task_id}"
 
 
-# --- Действия из напоминания (rt…): по завершении сообщение-напоминание удаляем ---
 async def _delete_message_safe(bot, chat_id: int, message_id: int) -> None:
     """Тихо удаляет сообщение (напр. напоминание), не падая на «уже удалено»."""
     try:
@@ -911,63 +910,32 @@ async def _delete_message_safe(bot, chat_id: int, message_id: int) -> None:
     _PANELS.pop(chat_id, None)
 
 
-@router.callback_query(F.data.startswith("rtdone:"))
-async def reminder_task_done(callback: CallbackQuery, state: FSMContext) -> None:
-    """✅ Выполнено из напоминания: отметить и удалить сообщение-напоминание."""
-    await state.clear()
-    tid = int(callback.data.split(":", 1)[1])
-    async with async_session_factory() as session:
-        await task_service.mark_done(session, tid)
-        await session.commit()
-    await callback.answer("✅ Задача выполнена")
-    await _delete_message_safe(callback.message.bot, callback.message.chat.id, callback.message.message_id)
+def _is_reminder_message(message) -> bool:
+    """Отличает сообщение-напоминание о задаче от карточки задачи (по тексту).
+
+    Кнопки у них одинаковые (taskdone/taskcat/taskdate), но для напоминания после
+    действия сообщение нужно удалить, а карточку в разделе «Задачи» — оставить.
+    """
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "")
+    return text.startswith("Скоро срок задачи") or text.startswith("Сегодня срок задачи")
 
 
-@router.callback_query(F.data.startswith("rtcat:"))
-async def reminder_task_category(callback: CallbackQuery, state: FSMContext) -> None:
-    """🏷 Категория из напоминания: запоминаем сообщение, чтобы удалить его после смены."""
-    await state.clear()
-    tid = int(callback.data.split(":", 1)[1])
-    title = await _task_title(tid)
-    await state.update_data(
-        edit_id=tid, new_title=None,
-        remind_chat=callback.message.chat.id, remind_msg=callback.message.message_id,
-    )
-    await state.set_state(TaskFSM.edit_priority)
-    await edit_or_send(
-        callback.message,
-        f"Задача: «{title}»\nНовая категория (приоритет/срок):",
-        reply_markup=_priority_kb("edit", with_date=True),
-    )
-    await callback.answer()
+def _remind_data(callback, tid: int) -> dict:
+    """Базовые данные FSM для правки задачи; для напоминания — координаты сообщения."""
+    data = {"edit_id": tid, "new_title": None}
+    if _is_reminder_message(callback.message):
+        data["remind_chat"] = callback.message.chat.id
+        data["remind_msg"] = callback.message.message_id
+    return data
 
 
-@router.callback_query(F.data.startswith("rtdate:"))
-async def reminder_task_date(callback: CallbackQuery, state: FSMContext) -> None:
-    """📅 Дата из напоминания: запоминаем сообщение, чтобы удалить его после переноса."""
-    await state.clear()
-    tid = int(callback.data.split(":", 1)[1])
-    title = await _task_title(tid)
-    await state.update_data(
-        edit_id=tid, new_title=None,
-        remind_chat=callback.message.chat.id, remind_msg=callback.message.message_id,
-    )
-    await state.set_state(TaskFSM.edit_date)
-    await edit_or_send(
-        callback.message,
-        f"Задача: «{title}»\nНовая дата в формате ДД.ММ.ГГГГ:",
-        reply_markup=cancel_kb(),
-    )
-    await callback.answer()
-
-
-# Смена категории из карточки задачи
+# Смена категории (из карточки задачи или из напоминания)
 @router.callback_query(F.data.startswith("taskcat:"))
 async def task_reassign_category(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     tid = int(callback.data.split(":", 1)[1])
     title = await _task_title(tid)
-    await state.update_data(edit_id=tid, new_title=None)
+    await state.update_data(**_remind_data(callback, tid))
     await state.set_state(TaskFSM.edit_priority)
     await edit_or_send(
         callback.message,
@@ -977,13 +945,13 @@ async def task_reassign_category(callback: CallbackQuery, state: FSMContext) -> 
     await callback.answer()
 
 
-# Перенос на дату из карточки задачи
+# Перенос на дату (из карточки задачи или из напоминания)
 @router.callback_query(F.data.startswith("taskdate:"))
 async def task_reassign_date(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     tid = int(callback.data.split(":", 1)[1])
     title = await _task_title(tid)
-    await state.update_data(edit_id=tid, new_title=None)
+    await state.update_data(**_remind_data(callback, tid))
     await state.set_state(TaskFSM.edit_date)
     await edit_or_send(
         callback.message,
@@ -1061,10 +1029,15 @@ async def task_delete(callback: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("taskdone:"))
 async def task_done(callback: CallbackQuery) -> None:
     task_id = int(callback.data.split(":", 1)[1])
+    from_reminder = _is_reminder_message(callback.message)
     async with async_session_factory() as session:
         await task_service.mark_done(session, task_id)
         await session.commit()
-    await callback.answer("Задача выполнена")
+    await callback.answer("✅ Задача выполнена")
+    if from_reminder:
+        # Из напоминания: удаляем сообщение, чтобы оно не копилось в чате.
+        await _delete_message_safe(callback.message.bot, callback.message.chat.id, callback.message.message_id)
+        return
     _back = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ К списку задач", callback_data="tasks:edit")]])
     try:
         await callback.message.edit_text("✅ Задача отмечена выполненной.", reply_markup=_back)

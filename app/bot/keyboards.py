@@ -52,14 +52,15 @@ def cancel_kb() -> InlineKeyboardMarkup:
 def task_reminder_kb(task_id: int) -> InlineKeyboardMarkup:
     """Кнопки в напоминании по задаче: выполнить / сменить категорию / перенести на дату.
 
-    Префикс `rt…` (reminder-task) — отдельный от карточки задачи: после завершения
-    действия сообщение-напоминание удаляется, чтобы не копить их в чате.
+    Те же callback'и, что и в карточке задачи: хендлер сам отличает напоминание от
+    карточки по тексту сообщения и после действия удаляет именно напоминание, чтобы
+    не копить их в чате.
     """
     return InlineKeyboardMarkup(
         inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Выполнено", callback_data=f"rtdone:{task_id}"),
-            InlineKeyboardButton(text="🏷 Категория", callback_data=f"rtcat:{task_id}"),
-            InlineKeyboardButton(text="📅 Дата", callback_data=f"rtdate:{task_id}"),
+            InlineKeyboardButton(text="✅ Выполнено", callback_data=f"taskdone:{task_id}"),
+            InlineKeyboardButton(text="🏷 Категория", callback_data=f"taskcat:{task_id}"),
+            InlineKeyboardButton(text="📅 Дата", callback_data=f"taskdate:{task_id}"),
         ]]
     )
 

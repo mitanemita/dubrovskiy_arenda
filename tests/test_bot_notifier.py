@@ -95,5 +95,18 @@ async def test_task_reminder_has_action_buttons(session, env):
 
     assert notif.status == NotifStatus.sent
     cbs = [btn.callback_data for row in fake.calls[0]["markup"].inline_keyboard for btn in row]
-    # Кнопки напоминания — отдельный префикс rt… (после действия сообщение удаляется).
-    assert "rtdone:42" in cbs and "rtcat:42" in cbs and "rtdate:42" in cbs
+    assert "taskdone:42" in cbs and "taskcat:42" in cbs and "taskdate:42" in cbs
+
+
+def test_is_reminder_message_distinguishes_reminder_from_card():
+    from types import SimpleNamespace
+
+    from app.bot.handlers_admin import _is_reminder_message
+
+    # Напоминания (новый и старый формат темы) — True
+    assert _is_reminder_message(SimpleNamespace(text="Сегодня срок задачи 🔴\nЗадача\nСрок: 08.09.2026"))
+    assert _is_reminder_message(SimpleNamespace(text="Скоро срок задачи 🟡\nЗадача\nСрок: 10.09.2026"))
+    assert _is_reminder_message(SimpleNamespace(text="Сегодня срок задачи (🟡 2 (7 дней))\n…"))
+    # Карточка задачи из меню — False (её нельзя удалять)
+    assert not _is_reminder_message(SimpleNamespace(text="Задача\n🔴 Купить\nКатегория: 1 (3 дня)"))
+    assert not _is_reminder_message(SimpleNamespace(text=None))
