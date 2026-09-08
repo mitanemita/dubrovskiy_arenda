@@ -1,0 +1,66 @@
+{
+  "name": "Аренда — отправка писем через Brevo API (send-email)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "send-email",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-send-email",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300],
+      "webhookId": "send-email"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.brevo.com/v3/smtp/email",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            { "name": "api-key", "value": "={{ $env.BREVO_API_KEY }}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => { const b = $json.body || $json; const atts = (b.attachments || []).map(a => ({ name: a.filename, content: a.content_base64 })); const body = { sender: { email: b.from }, to: [ { email: b.to } ], subject: b.subject, textContent: b.text }; if (atts.length) body.attachment = atts; return JSON.stringify(body); })() }}",
+        "options": {}
+      },
+      "id": "brevo-send",
+      "name": "Brevo API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [540, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"ok\": true } }}",
+        "options": {}
+      },
+      "id": "respond-ok",
+      "name": "Ответить боту",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [820, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Brevo API", "type": "main", "index": 0 }]]
+    },
+    "Brevo API": {
+      "main": [[{ "node": "Ответить боту", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "tags": []
+}

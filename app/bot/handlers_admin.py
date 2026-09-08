@@ -2,6 +2,12 @@
 
 UI-обёртки над сервисами (settings/expense/reading/adjustment/report).
 Бизнес-логика и расчёты — в сервисах и покрыты тестами.
+
+Навигация построена на инлайн-кнопках (callback_data), поэтому переход в любой
+раздел работает всегда — в том числе посреди незавершённого ввода: callback не
+перехватывается обработчиками FSM-состояний и сбрасывает состояние. Ожидание
+текстового сообщения (FSM) остаётся только там, где нужно ввести непредсказуемое
+значение — сумму, показания, текст/дату задачи, причину корректировки.
 """
 from __future__ import annotations
 
@@ -9,6 +15,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -17,16 +24,16 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
 )
 from sqlalchemy import select
 
+from app.bot.keyboards import back_kb, cancel_kb, main_menu_kb
 from app.db.base import async_session_factory
-from app.db.enums import DataSource, ExpenseCategory, LeaseStatus
-from app.db.models import Lease, Meter, Premises, Tenant, User
+from app.db.enums import ChargeType, DataSource, ExpenseCategory, LeaseStatus
+from app.db.models import Charge, Lease, Meter, Premises, Tenant, User
 from app.services import (
     adjustment_service,
+    billing_service,
     confirmation_service,
     expense_service,
     matching_service,
@@ -38,6 +45,83 @@ from app.services import (
 )
 
 router = Router()
+
+
+# Лимит длины сообщения Telegram — 4096 символов; берём с запасом.
+_TG_MAX_LEN = 4000
+
+
+def _clip(text: str) -> str:
+    """Обрезает текст до лимита Telegram, чтобы длинное сообщение не роняло бот."""
+    if len(text) <= _TG_MAX_LEN:
+        return text
+    return text[: _TG_MAX_LEN - 1] + "…"
+
+
+# Реестр «активного сообщения-панели» по чату. Позволяет мастерам жить в одном
+# сообщении: навигация и шаги ввода правят одну и ту же панель, а сообщения
+# пользователя удаляет FSMCleanupMiddleware. Хранится в памяти процесса.
+_PANELS: dict[int, int] = {}
+
+
+def _set_panel(message: Message) -> None:
+    try:
+        _PANELS[message.chat.id] = message.message_id
+    except Exception:
+        pass
+
+
+async def edit_or_send(message: Message, text: str, reply_markup=None) -> None:
+    """Навигация без спама: правит текущее сообщение бота, иначе шлёт новое.
+
+    Используется в callback-хендлерах, чтобы переход в другое меню заменял
+    предыдущее сообщение, а не добавлял новое. Текст обрезается до лимита Telegram.
+    Отредактированное сообщение запоминается как «панель» чата.
+    """
+    text = _clip(text)
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+        _set_panel(message)
+        return
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc):
+            _set_panel(message)
+            return
+        m = await message.answer(text, reply_markup=reply_markup)
+        _set_panel(m)
+    except Exception:
+        m = await message.answer(text, reply_markup=reply_markup)
+        _set_panel(m)
+
+
+async def send_panel(message: Message, text: str, reply_markup=None) -> Message:
+    """Отправляет новое сообщение и делает его «панелью» чата (точки входа: /start, /menu)."""
+    m = await message.answer(_clip(text), reply_markup=reply_markup)
+    _set_panel(m)
+    return m
+
+
+async def wiz_reply(message: Message, text: str, reply_markup=None) -> None:
+    """Ответ на ввод в мастере: правит панель чата, чтобы не плодить сообщения.
+
+    Само сообщение пользователя удаляет FSMCleanupMiddleware — так в чате остаётся
+    одно «живое» сообщение бота.
+    """
+    text = _clip(text)
+    chat_id = message.chat.id
+    pid = _PANELS.get(chat_id)
+    if pid:
+        try:
+            await message.bot.edit_message_text(text, chat_id=chat_id, message_id=pid, reply_markup=reply_markup)
+            return
+        except TelegramBadRequest as exc:
+            if "message is not modified" in str(exc):
+                return
+        except Exception:
+            pass
+    m = await message.answer(text, reply_markup=reply_markup)
+    _set_panel(m)
+
 
 # Настройки, доступные для правки через бота: ключ -> подпись
 _EDITABLE_SETTINGS = {
@@ -77,28 +161,38 @@ class ReadingFSM(StatesGroup):
 
 class TaskFSM(StatesGroup):
     add_title = State()
+    add_assignee = State()
+    add_assignee_text = State()
     add_priority = State()
     add_date = State()
     bulk_titles = State()
     edit_title = State()
     edit_priority = State()
     edit_date = State()
+    edit_assignee_text = State()
+
+
+# Предустановленные адресаты задач
+_ASSIGNEES = {"mitya": "Митя", "alexey": "Алексей"}
+
+
+def _assignee_label(assignee: str | None) -> str:
+    return f"👤 {assignee}" if assignee else "👥 общая"
+
+
+def _assignee_kb(add_cb_prefix: str) -> InlineKeyboardMarkup:
+    """Клавиатура выбора адресата. Кнопки формируют callback f'{prefix}:{code}'."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Митя", callback_data=f"{add_cb_prefix}:mitya"),
+         InlineKeyboardButton(text="👤 Алексей", callback_data=f"{add_cb_prefix}:alexey")],
+        [InlineKeyboardButton(text="✍️ Ввести имя", callback_data=f"{add_cb_prefix}:text"),
+         InlineKeyboardButton(text="👥 Общая", callback_data=f"{add_cb_prefix}:none")],
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")],
+    ])
 
 
 class PayFSM(StatesGroup):
     amount = State()
-
-
-def main_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="💸 Расход")],
-            [KeyboardButton(text="🔢 Показания"), KeyboardButton(text="✏️ Корректировка")],
-            [KeyboardButton(text="📝 Задачи"), KeyboardButton(text="💰 Отметить оплату")],
-            [KeyboardButton(text="📊 Отчёты")],
-        ],
-        resize_keyboard=True,
-    )
 
 
 async def _landlord_id(session, tg_id: int) -> int | None:
@@ -125,22 +219,45 @@ def _parse_date(text: str) -> date | None:
         return None
 
 
-# --- Меню ------------------------------------------------------------------
+# --- Главное меню ----------------------------------------------------------
+async def show_main_menu(message: Message, *, greet: bool = False, edit: bool = False) -> None:
+    """Показывает главное меню (инлайн). greet — приветствие; edit — правит сообщение."""
+    text = (
+        "👋 Бот учёта аренды.\nВыберите раздел:"
+        if greet
+        else "Главное меню — выберите раздел:"
+    )
+    if edit:
+        await edit_or_send(message, text, reply_markup=main_menu_kb())
+    else:
+        await send_panel(message, text, reply_markup=main_menu_kb())
+
+
 @router.message(Command("menu"))
-async def cmd_menu(message: Message) -> None:
-    await message.answer("Главное меню:", reply_markup=main_menu())
+async def cmd_menu(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await show_main_menu(message)
+
+
+@router.callback_query(F.data == "nav:home")
+async def nav_home(callback: CallbackQuery, state: FSMContext) -> None:
+    """Возврат в главное меню из любого места, сброс незавершённого ввода."""
+    await state.clear()
+    await show_main_menu(callback.message, edit=True)
+    await callback.answer()
 
 
 # --- Настройки -------------------------------------------------------------
-@router.message(F.text == "⚙️ Настройки")
-async def settings_menu(message: Message) -> None:
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=title, callback_data=f"set:{key}")]
-            for key, title in _EDITABLE_SETTINGS.items()
-        ]
-    )
-    await message.answer("Выберите параметр для изменения:", reply_markup=kb)
+@router.callback_query(F.data == "menu:settings")
+async def settings_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    rows = [
+        [InlineKeyboardButton(text=title, callback_data=f"set:{key}")]
+        for key, title in _EDITABLE_SETTINGS.items()
+    ]
+    rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")])
+    await edit_or_send(callback.message, "Выберите параметр для изменения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("set:"))
@@ -151,8 +268,9 @@ async def settings_pick(callback: CallbackQuery, state: FSMContext) -> None:
         current = await settings_service.get_setting(session, lid, key) if lid else None
     await state.update_data(setting_key=key)
     await state.set_state(SettingFSM.value)
-    await callback.message.answer(
-        f"{_EDITABLE_SETTINGS.get(key, key)} (текущее: {current}).\nВведите новое значение:"
+    await edit_or_send(callback.message, 
+        f"{_EDITABLE_SETTINGS.get(key, key)} (текущее: {current}).\nВведите новое значение:",
+        reply_markup=cancel_kb(),
     )
     await callback.answer()
 
@@ -162,26 +280,55 @@ async def settings_save(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     key = data["setting_key"]
     if _parse_amount(message.text) is None:
-        await message.answer("❌ Введите число. Повторите:")
+        await wiz_reply(message, "❌ Введите число. Повторите:", reply_markup=cancel_kb())
         return
     async with async_session_factory() as session:
         lid = await _landlord_id(session, message.from_user.id)
         await settings_service.set_setting(session, lid, key, message.text.replace(",", ".").strip())
         await session.commit()
     await state.clear()
-    await message.answer("✅ Значение сохранено.", reply_markup=main_menu())
+    await wiz_reply(message, "✅ Значение сохранено.", reply_markup=main_menu_kb())
 
 
 # --- Расходы ---------------------------------------------------------------
-@router.message(F.text == "💸 Расход")
-async def expense_menu(message: Message) -> None:
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=title, callback_data=f"exp:{code}")]
-            for code, title in _EXPENSE_CHOICES.items()
-        ]
-    )
-    await message.answer("Категория расхода:", reply_markup=kb)
+# Русские названия всех категорий расходов (для списка и правки)
+_EXPENSE_LABELS = {
+    ExpenseCategory.server: "Серверная",
+    ExpenseCategory.electricity: "Электричество",
+    ExpenseCategory.salary: "Зарплаты",
+    ExpenseCategory.travel: "Командировочные",
+    ExpenseCategory.repair: "Текущий ремонт",
+    ExpenseCategory.docs: "Документация",
+    ExpenseCategory.taxes: "Налоги",
+    ExpenseCategory.other: "Прочее",
+}
+
+
+def _expense_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить расход", callback_data="exp_add")],
+        [InlineKeyboardButton(text="📋 Расходы месяца (правка)", callback_data="exp_list")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
+    ])
+
+
+@router.callback_query(F.data == "menu:expense")
+async def expense_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await edit_or_send(callback.message, "<b>💸 Расходы</b> — что сделать?", reply_markup=_expense_menu_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "exp_add")
+async def expense_add(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    rows = [
+        [InlineKeyboardButton(text=title, callback_data=f"exp:{code}")]
+        for code, title in _EXPENSE_CHOICES.items()
+    ]
+    rows.append([InlineKeyboardButton(text="◀️ К расходам", callback_data="menu:expense")])
+    await edit_or_send(callback.message, "Категория расхода:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("exp:"))
@@ -189,7 +336,7 @@ async def expense_pick(callback: CallbackQuery, state: FSMContext) -> None:
     code = callback.data.split(":", 1)[1]
     await state.update_data(expense_category=code)
     await state.set_state(ExpenseFSM.amount)
-    await callback.message.answer(f"Расход «{_EXPENSE_CHOICES[code]}». Введите сумму, ₽:")
+    await edit_or_send(callback.message, f"Расход «{_EXPENSE_CHOICES[code]}». Введите сумму, ₽:", reply_markup=cancel_kb())
     await callback.answer()
 
 
@@ -197,7 +344,7 @@ async def expense_pick(callback: CallbackQuery, state: FSMContext) -> None:
 async def expense_save(message: Message, state: FSMContext) -> None:
     amount = _parse_amount(message.text)
     if amount is None or amount <= 0:
-        await message.answer("❌ Введите положительную сумму. Повторите:")
+        await wiz_reply(message, "❌ Введите положительную сумму. Повторите:", reply_markup=cancel_kb())
         return
     data = await state.get_data()
     category = ExpenseCategory(data["expense_category"])
@@ -208,33 +355,95 @@ async def expense_save(message: Message, state: FSMContext) -> None:
         )
         await session.commit()
     await state.clear()
-    await message.answer(f"✅ Расход {amount} ₽ добавлен.", reply_markup=main_menu())
+    await wiz_reply(message, f"✅ Расход {amount} ₽ добавлен.", reply_markup=_expense_menu_kb())
 
 
-# --- Корректировка (с аудитом) --------------------------------------------
-@router.message(F.text == "✏️ Корректировка")
-async def adjust_start(message: Message, state: FSMContext) -> None:
+# Список расходов месяца + правка суммы (с аудитом) — вместо общей «Корректировки»
+def _shift_month(period: date, delta: int) -> date:
+    """Сдвигает период на delta месяцев (для навигации по месяцам)."""
+    m = period.month - 1 + delta
+    return date(period.year + m // 12, m % 12 + 1, 1)
+
+
+@router.callback_query(F.data.startswith("exp_list"))
+async def expense_list(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    parts = callback.data.split(":")
+    period = _period_from_code(parts[1]) if len(parts) > 1 else billing_service.period_start(date.today())
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        items = await expense_service.list_expenses(session, lid, period) if lid else []
+    lines = [f"<b>💸 Расходы — {_period_ru(period)}</b> (нажмите № для правки суммы):"]
+    if not items:
+        lines.append("— пусто")
+    for i, e in enumerate(items, start=1):
+        lines.append(f"{i}. {_EXPENSE_LABELS.get(e.category, e.category.value)}: {e.amount} ₽")
+    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"ecorr:{e.id}") for i, e in enumerate(items, start=1)]
+    rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    rows.append([
+        InlineKeyboardButton(text="◀️ Пред. месяц", callback_data=f"exp_list:{_period_code(_shift_month(period, -1))}"),
+        InlineKeyboardButton(text="След. месяц ▶️", callback_data=f"exp_list:{_period_code(_shift_month(period, 1))}"),
+    ])
+    rows.append([InlineKeyboardButton(text="◀️ К расходам", callback_data="menu:expense")])
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ecorr:"))
+async def expense_correct_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.update_data(entity_type="expense", entity_id=int(callback.data.split(":", 1)[1]))
     await state.set_state(AdjustFSM.amount)
-    await message.answer(
-        "Корректировка суммы. Введите: <тип> <id> <новая_сумма>\n"
-        "тип: charge (начисление) или expense (расход)\n"
-        "Пример: charge 12 45000"
-    )
+    await edit_or_send(callback.message, "Введите новую сумму расхода, ₽:", reply_markup=cancel_kb())
+    await callback.answer()
+
+
+# --- Правка доходов (начислений) по договору за месяц ----------------------
+@router.callback_query(F.data.startswith("lchg:"))
+async def lease_charges_list(callback: CallbackQuery, state: FSMContext) -> None:
+    """Начисления договора за месяц (аренда/электричество/пеня) с правкой суммы."""
+    await state.clear()
+    parts = callback.data.split(":")
+    lease_id = int(parts[1])
+    period = _period_from_code(parts[2]) if len(parts) > 2 else billing_service.period_start(date.today())
+    async with async_session_factory() as session:
+        charges = (await session.execute(
+            select(Charge).where(Charge.lease_id == lease_id, Charge.period == period).order_by(Charge.type)
+        )).scalars().all()
+    lines = [f"<b>💵 Начисления по договору — {_period_ru(period)}</b> (нажмите № для правки суммы):"]
+    if not charges:
+        lines.append("— начислений нет")
+    for i, c in enumerate(charges, start=1):
+        lines.append(f"{i}. {_CHARGE_TYPE_LABEL.get(c.type, c.type.value)}: {c.amount} ₽ (оплачено {c.paid_amount} ₽)")
+    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"ccorr:{c.id}") for i, c in enumerate(charges, start=1)]
+    rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    rows.append([
+        InlineKeyboardButton(text="◀️ Пред. месяц", callback_data=f"lchg:{lease_id}:{_period_code(_shift_month(period, -1))}"),
+        InlineKeyboardButton(text="След. месяц ▶️", callback_data=f"lchg:{lease_id}:{_period_code(_shift_month(period, 1))}"),
+    ])
+    rows.append([InlineKeyboardButton(text="◀️ К договору", callback_data=f"lpick:{lease_id}")])
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ccorr:"))
+async def charge_correct_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.update_data(entity_type="charge", entity_id=int(callback.data.split(":", 1)[1]))
+    await state.set_state(AdjustFSM.amount)
+    await edit_or_send(callback.message, "Введите новую сумму начисления, ₽:", reply_markup=cancel_kb())
+    await callback.answer()
 
 
 @router.message(AdjustFSM.amount)
-async def adjust_parse(message: Message, state: FSMContext) -> None:
-    parts = message.text.split()
-    if len(parts) != 3 or parts[0] not in ("charge", "expense"):
-        await message.answer("❌ Формат: <charge|expense> <id> <сумма>. Повторите:")
-        return
-    amount = _parse_amount(parts[2])
+async def adjust_amount(message: Message, state: FSMContext) -> None:
+    amount = _parse_amount(message.text)
     if amount is None or amount < 0:
-        await message.answer("❌ Некорректная сумма. Повторите:")
+        await wiz_reply(message, "❌ Введите неотрицательную сумму. Повторите:", reply_markup=cancel_kb())
         return
-    await state.update_data(entity_type=parts[0], entity_id=int(parts[1]), new_amount=str(amount))
+    await state.update_data(new_amount=str(amount))
     await state.set_state(AdjustFSM.reason)
-    await message.answer("Укажите причину корректировки:")
+    await wiz_reply(message, "Укажите причину корректировки:", reply_markup=cancel_kb())
 
 
 @router.message(AdjustFSM.reason)
@@ -259,19 +468,23 @@ async def adjust_save(message: Message, state: FSMContext) -> None:
         except ValueError as exc:
             await session.rollback()
             await state.clear()
-            await message.answer(f"❌ {exc}", reply_markup=main_menu())
+            await wiz_reply(message, f"❌ {exc}", reply_markup=main_menu_kb())
             return
+    kind = data.get("entity_type")
     await state.clear()
-    await message.answer("✅ Корректировка сохранена (записана в аудит).", reply_markup=main_menu())
+    kb = _expense_menu_kb() if kind == "expense" else main_menu_kb()
+    await wiz_reply(message, "✅ Сумма скорректирована (записано в аудит).", reply_markup=kb)
 
 
 # --- Показания счётчиков (ручной ввод / электричество) --------------------
-@router.message(F.text == "🔢 Показания")
-async def readings_menu(message: Message) -> None:
+@router.callback_query(F.data == "menu:readings")
+async def readings_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     async with async_session_factory() as session:
-        lid = await _landlord_id(session, message.from_user.id)
+        lid = await _landlord_id(session, callback.from_user.id)
         if lid is None:
-            await message.answer("Нет арендодателя.")
+            await edit_or_send(callback.message, "Нет арендодателя.", reply_markup=back_kb())
+            await callback.answer()
             return
         rows = (
             await session.execute(
@@ -281,28 +494,44 @@ async def readings_menu(message: Message) -> None:
             )
         ).all()
     if not rows:
-        await message.answer("Счётчиков пока нет.")
+        await edit_or_send(callback.message, "Счётчиков пока нет.", reply_markup=back_kb())
+        await callback.answer()
         return
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(
-                text=f"{prem} · {serial or label or ('счётчик ' + str(mid))}",
-                callback_data=f"mr:{mid}",
-            )]
-            for mid, serial, label, prem in rows
-        ]
-    )
-    await message.answer("Выберите счётчик для ввода показаний:", reply_markup=kb)
+    kb_rows = [
+        [InlineKeyboardButton(
+            text=f"{prem} · {serial or label or ('счётчик ' + str(mid))}",
+            callback_data=f"mr:{mid}",
+        )]
+        for mid, serial, label, prem in rows
+    ]
+    kb_rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")])
+    await edit_or_send(callback.message, "Выберите счётчик для ввода показаний:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("mr:"))
 async def reading_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    from app.db.models import MeterReading
     meter_id = int(callback.data.split(":", 1)[1])
     await state.update_data(meter_id=meter_id)
     await state.set_state(ReadingFSM.value)
-    await callback.message.answer(
+    async with async_session_factory() as session:
+        last = (await session.execute(
+            select(MeterReading).where(MeterReading.meter_id == meter_id)
+            .order_by(MeterReading.period.desc()).limit(1)
+        )).scalars().first()
+    if last is not None:
+        current = (
+            f"Последнее показание: <b>{last.curr_value}</b> за {last.period.strftime('%m.%Y')} "
+            f"(расход {last.consumption} кВт·ч).\n"
+        )
+    else:
+        current = "Показаний ещё нет.\n"
+    await edit_or_send(callback.message,
+        current +
         "Введите период и текущие показания в формате: ММ.ГГГГ значение\n"
-        "Пример: 04.2026 15350"
+        "Пример: 04.2026 15350",
+        reply_markup=cancel_kb(),
     )
     await callback.answer()
 
@@ -311,17 +540,17 @@ async def reading_pick(callback: CallbackQuery, state: FSMContext) -> None:
 async def reading_save(message: Message, state: FSMContext) -> None:
     parts = message.text.split()
     if len(parts) != 2:
-        await message.answer("❌ Формат: ММ.ГГГГ значение. Повторите:")
+        await wiz_reply(message, "❌ Формат: ММ.ГГГГ значение. Повторите:", reply_markup=cancel_kb())
         return
     try:
         month, year = parts[0].split(".")
         period = date(int(year), int(month), 1)
     except (ValueError, IndexError):
-        await message.answer("❌ Неверный период (ММ.ГГГГ). Повторите:")
+        await wiz_reply(message, "❌ Неверный период (ММ.ГГГГ). Повторите:", reply_markup=cancel_kb())
         return
     curr = _parse_amount(parts[1])
     if curr is None or curr < 0:
-        await message.answer("❌ Неверное значение показаний. Повторите:")
+        await wiz_reply(message, "❌ Неверное значение показаний. Повторите:", reply_markup=cancel_kb())
         return
 
     data = await state.get_data()
@@ -329,7 +558,7 @@ async def reading_save(message: Message, state: FSMContext) -> None:
         meter = await session.get(Meter, data["meter_id"])
         if meter is None:
             await state.clear()
-            await message.answer("❌ Счётчик не найден.", reply_markup=main_menu())
+            await wiz_reply(message, "❌ Счётчик не найден.", reply_markup=main_menu_kb())
             return
         try:
             reading = await reading_service.upsert_reading(
@@ -339,11 +568,11 @@ async def reading_save(message: Message, state: FSMContext) -> None:
         except ValueError as exc:
             await session.rollback()
             await state.clear()
-            await message.answer(f"❌ {exc}", reply_markup=main_menu())
+            await wiz_reply(message, f"❌ {exc}", reply_markup=main_menu_kb())
             return
     await state.clear()
-    await message.answer(
-        f"✅ Показания сохранены. Расход: {reading.consumption} кВт·ч.", reply_markup=main_menu()
+    await wiz_reply(message, 
+        f"✅ Показания сохранены. Расход: {reading.consumption} кВт·ч.", reply_markup=main_menu_kb()
     )
 
 
@@ -362,49 +591,197 @@ def _priority_kb(context: str, with_keep: bool = False, with_date: bool = False)
         extra.append(InlineKeyboardButton(text="↔️ Не менять", callback_data="tp:edit:keep"))
     if extra:
         rows.append(extra)
+    rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.message(F.text == "📝 Задачи")
-async def tasks_menu(message: Message) -> None:
-    async with async_session_factory() as session:
-        lid = await _landlord_id(session, message.from_user.id)
-        tasks = await task_service.list_tasks(session, lid) if lid else []
+def _tasks_menu_kb() -> InlineKeyboardMarkup:
+    """Компактное меню раздела «Задачи»."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Ближайшие", callback_data="tasks:recent"),
+         InlineKeyboardButton(text="✏️ Редактировать", callback_data="tasks:edit")],
+        [InlineKeyboardButton(text="➕ Задача", callback_data="task_add"),
+         InlineKeyboardButton(text="➕ Списком", callback_data="task_bulk")],
+        [InlineKeyboardButton(text="✅ Выполненные", callback_data="tasks:done")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
+    ])
 
-    rows = [[
-        InlineKeyboardButton(text="➕ Задача", callback_data="task_add"),
-        InlineKeyboardButton(text="➕ Списком", callback_data="task_bulk"),
-    ]]
-    lines = ["<b>📝 Задачи (ближайшие сверху):</b>"]
+
+def _due_human(due) -> str:
+    """Человекочитаемый остаток до срока: реальные дни, а не «окно приоритета»."""
+    if due is None:
+        return "без срока"
+    days = (due - date.today()).days
+    if days > 0:
+        return f"осталось {days} дн."
+    if days == 0:
+        return "сегодня"
+    return f"просрочено на {-days} дн."
+
+
+def _task_line(idx: int, t) -> str:
+    due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
+    icon = task_service.due_color_icon(t.due_date)
+    return f"{idx}. {icon} {t.title} · {_assignee_label(t.assignee)} · до {due} ({_due_human(t.due_date)})"
+
+
+@router.callback_query(F.data == "menu:tasks")
+async def tasks_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await edit_or_send(callback.message, "<b>📝 Задачи</b> — что открыть?", reply_markup=_tasks_menu_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "tasks:recent")
+async def tasks_recent(callback: CallbackQuery, state: FSMContext) -> None:
+    """Первые 10 ближайших задач (без кнопок по каждой)."""
+    await state.clear()
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        tasks = await task_service.list_tasks(session, lid) if lid else []
+    lines = ["<b>📋 Ближайшие задачи:</b>", f"<i>{task_service.DUE_COLOR_LEGEND}</i>"]
     if not tasks:
         lines.append("— пусто")
-    for t in tasks:
-        due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
-        lines.append(f"{task_service.PRIORITY_LABEL.get(t.priority, '')} {t.title} · до {due}")
-        rows.append([
-            InlineKeyboardButton(text=f"✏️ {t.title[:14]}", callback_data=f"taskedit:{t.id}"),
-            InlineKeyboardButton(text="✅", callback_data=f"taskdone:{t.id}"),
-            InlineKeyboardButton(text="🗑", callback_data=f"taskdel:{t.id}"),
-        ])
-    await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    for i, t in enumerate(tasks[:10], start=1):
+        lines.append(_task_line(i, t))
+    if len(tasks) > 10:
+        lines.append(f"… и ещё {len(tasks) - 10}. Для правки — «✏️ Редактировать».")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ К задачам", callback_data="menu:tasks")]])
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=kb)
+    await callback.answer()
+
+
+# Сколько задач показываем на одной странице редактирования
+_TASKS_PAGE = 20
+
+
+@router.callback_query(F.data == "tasks:edit")
+@router.callback_query(F.data.startswith("tasks:editp:"))
+async def tasks_edit_list(callback: CallbackQuery, state: FSMContext) -> None:
+    """Постраничный список задач + кнопки-номера для выбора конкретной задачи.
+
+    Пагинация нужна, чтобы длинный список не превышал лимит сообщения Telegram.
+    """
+    await state.clear()
+    offset = int(callback.data.split(":")[2]) if callback.data.startswith("tasks:editp:") else 0
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        tasks = await task_service.list_tasks(session, lid) if lid else []
+
+    total = len(tasks)
+    offset = max(0, min(offset, (total - 1) // _TASKS_PAGE * _TASKS_PAGE if total else 0))
+    page = tasks[offset:offset + _TASKS_PAGE]
+
+    lines = ["<b>✏️ Редактирование задач</b>", f"<i>{task_service.DUE_COLOR_LEGEND}</i>"]
+    if not tasks:
+        lines.append("— пусто")
+    else:
+        page_no = offset // _TASKS_PAGE + 1
+        pages_total = (total + _TASKS_PAGE - 1) // _TASKS_PAGE
+        lines.append(f"Стр. {page_no}/{pages_total}. Выберите номер задачи:")
+        for i, t in enumerate(page, start=offset + 1):
+            lines.append(_task_line(i, t))
+
+    # Кнопки-номера только для текущей страницы, по 5 в ряд
+    num_buttons = [
+        InlineKeyboardButton(text=str(offset + i), callback_data=f"tpick:{t.id}")
+        for i, t in enumerate(page, start=1)
+    ]
+    rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton(text="◀️ Пред.", callback_data=f"tasks:editp:{offset - _TASKS_PAGE}"))
+    if offset + _TASKS_PAGE < total:
+        nav.append(InlineKeyboardButton(text="След. ▶️", callback_data=f"tasks:editp:{offset + _TASKS_PAGE}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="◀️ К задачам", callback_data="menu:tasks")])
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tpick:"))
+async def task_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    """Карточка выбранной задачи с действиями и кнопкой «Назад»."""
+    await state.clear()
+    task_id = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        t = await task_service.get_task(session, task_id)
+    if t is None:
+        await callback.answer("Задача не найдена", show_alert=True)
+        return
+    due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
+    icon = task_service.due_color_icon(t.due_date)
+    text = (
+        f"<b>Задача</b>\n"
+        f"{icon} {t.title}\n"
+        f"Категория: {task_service.PRIORITY_TEXT.get(t.priority, '')}\n"
+        f"Адресат: {_assignee_label(t.assignee)}\n"
+        f"Срок: {due} ({_due_human(t.due_date)}) · статус: {t.status.value}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"taskdone:{t.id}"),
+         InlineKeyboardButton(text="🗑 Удалить", callback_data=f"taskdel:{t.id}")],
+        [InlineKeyboardButton(text="🏷 Категория", callback_data=f"taskcat:{t.id}"),
+         InlineKeyboardButton(text="📅 Дата", callback_data=f"taskdate:{t.id}")],
+        [InlineKeyboardButton(text="👤 Адресат", callback_data=f"taskasg:{t.id}")],
+        [InlineKeyboardButton(text="◀️ К списку", callback_data="tasks:edit")],
+    ])
+    await edit_or_send(callback.message, text, reply_markup=kb)
+    await callback.answer()
 
 
 # Добавление одной задачи
 @router.callback_query(F.data == "task_add")
 async def task_add_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     await state.set_state(TaskFSM.add_title)
-    await callback.message.answer("Введите текст задачи:")
+    await edit_or_send(callback.message, "Введите текст задачи:", reply_markup=cancel_kb())
     await callback.answer()
 
 
 @router.message(TaskFSM.add_title)
 async def task_add_title(message: Message, state: FSMContext) -> None:
-    await state.update_data(title=message.text.strip())
-    await state.set_state(TaskFSM.add_priority)
-    await message.answer(
+    title = message.text.strip()
+    if not title:
+        await wiz_reply(message, "❌ Текст задачи не может быть пустым. Повторите:", reply_markup=cancel_kb())
+        return
+    await state.update_data(title=title)
+    await state.set_state(TaskFSM.add_assignee)
+    await wiz_reply(message, "Кому поставить задачу?", reply_markup=_assignee_kb("asg"))
+
+
+async def _ask_priority(message: Message) -> None:
+    await wiz_reply(message, 
         "Выберите приоритет (задаёт срок) или «На дату»:",
         reply_markup=_priority_kb("add", with_date=True),
     )
+
+
+@router.callback_query(TaskFSM.add_assignee, F.data.startswith("asg:"))
+async def task_add_assignee(callback: CallbackQuery, state: FSMContext) -> None:
+    code = callback.data.split(":", 1)[1]
+    if code == "text":
+        await state.set_state(TaskFSM.add_assignee_text)
+        await edit_or_send(callback.message, "Введите имя адресата:", reply_markup=cancel_kb())
+        await callback.answer()
+        return
+    assignee = None if code == "none" else _ASSIGNEES.get(code)
+    await state.update_data(assignee=assignee)
+    await state.set_state(TaskFSM.add_priority)
+    await _ask_priority(callback.message)
+    await callback.answer()
+
+
+@router.message(TaskFSM.add_assignee_text)
+async def task_add_assignee_text(message: Message, state: FSMContext) -> None:
+    name = message.text.strip()
+    if not name:
+        await wiz_reply(message, "❌ Имя не может быть пустым. Повторите:", reply_markup=cancel_kb())
+        return
+    await state.update_data(assignee=name)
+    await state.set_state(TaskFSM.add_priority)
+    await _ask_priority(message)
 
 
 async def _create_task_and_reply(callback_or_msg, state, *, priority, due_date, user_tg_id):
@@ -416,6 +793,7 @@ async def _create_task_and_reply(callback_or_msg, state, *, priority, due_date, 
         task = await task_service.create_task(
             session, landlord_id=lid, title=data["title"], priority=priority,
             due_date=due_date, created_by_id=user.id if user else None,
+            assignee=data.get("assignee"),
         )
         await session.flush()
         due_str = task.due_date.strftime("%d.%m.%Y")
@@ -427,7 +805,7 @@ async def _create_task_and_reply(callback_or_msg, state, *, priority, due_date, 
 @router.callback_query(TaskFSM.add_priority, F.data == "tp:add:date")
 async def task_add_pick_date(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TaskFSM.add_date)
-    await callback.message.answer("Введите дату задачи в формате ДД.ММ.ГГГГ:")
+    await edit_or_send(callback.message, "Введите дату задачи в формате ДД.ММ.ГГГГ:", reply_markup=cancel_kb())
     await callback.answer()
 
 
@@ -435,12 +813,12 @@ async def task_add_pick_date(callback: CallbackQuery, state: FSMContext) -> None
 async def task_add_date(message: Message, state: FSMContext) -> None:
     due = _parse_date(message.text)
     if due is None:
-        await message.answer("❌ Формат ДД.ММ.ГГГГ. Повторите:")
+        await wiz_reply(message, "❌ Формат ДД.ММ.ГГГГ. Повторите:", reply_markup=cancel_kb())
         return
     due_str = await _create_task_and_reply(
         message, state, priority=task_service.TaskPriority.medium, due_date=due, user_tg_id=message.from_user.id
     )
-    await message.answer(f"✅ Задача добавлена на {due_str}.", reply_markup=main_menu())
+    await wiz_reply(message, f"✅ Задача добавлена на {due_str}.", reply_markup=main_menu_kb())
 
 
 @router.callback_query(TaskFSM.add_priority, F.data.startswith("tp:add:"))
@@ -449,22 +827,24 @@ async def task_add_priority(callback: CallbackQuery, state: FSMContext) -> None:
     due_str = await _create_task_and_reply(
         callback, state, priority=priority, due_date=None, user_tg_id=callback.from_user.id
     )
-    await callback.message.answer(f"✅ Задача добавлена. Срок: {due_str}.", reply_markup=main_menu())
+    await edit_or_send(callback.message, f"✅ Задача добавлена. Срок: {due_str}.", reply_markup=main_menu_kb())
     await callback.answer()
 
 
 # Добавление списком (приоритет/дата — в конце каждой строки)
 @router.callback_query(F.data == "task_bulk")
 async def task_bulk_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     await state.set_state(TaskFSM.bulk_titles)
-    await callback.message.answer(
+    await edit_or_send(callback.message, 
         "Пришлите задачи списком — по одной на строку.\n"
         "В конце строки укажите приоритет <b>1</b>/<b>2</b>/<b>3</b> или дату <b>ДД.ММ.ГГГГ</b>.\n"
         "Если ничего не указано — приоритет 2.\n\n"
         "Пример:\n"
         "<code>Позвонить электрику 1\n"
         "Уборка территории 3\n"
-        "Вывоз камней литера А 15.12.2026</code>"
+        "Вывоз камней литера А 15.12.2026</code>",
+        reply_markup=cancel_kb(),
     )
     await callback.answer()
 
@@ -473,7 +853,7 @@ async def task_bulk_start(callback: CallbackQuery, state: FSMContext) -> None:
 async def task_bulk_save(message: Message, state: FSMContext) -> None:
     lines = [ln for ln in message.text.splitlines() if ln.strip()]
     if not lines:
-        await message.answer("❌ Пусто. Пришлите задачи по одной на строку:")
+        await wiz_reply(message, "❌ Пусто. Пришлите задачи по одной на строку:", reply_markup=cancel_kb())
         return
     async with async_session_factory() as session:
         lid = await _landlord_id(session, message.from_user.id)
@@ -484,15 +864,22 @@ async def task_bulk_save(message: Message, state: FSMContext) -> None:
         )
         await session.commit()
     await state.clear()
-    await message.answer(f"✅ Добавлено задач: {len(created)}.", reply_markup=main_menu())
+    await wiz_reply(message, f"✅ Добавлено задач: {len(created)}.", reply_markup=main_menu_kb())
 
 
 # Редактирование
 @router.callback_query(F.data.startswith("taskedit:"))
 async def task_edit_start(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(edit_id=int(callback.data.split(":", 1)[1]))
+    await state.clear()
+    tid = int(callback.data.split(":", 1)[1])
+    title = await _task_title(tid)
+    await state.update_data(edit_id=tid)
     await state.set_state(TaskFSM.edit_title)
-    await callback.message.answer("Новый текст задачи (или «-» чтобы оставить как есть):")
+    await edit_or_send(
+        callback.message,
+        f"Задача: «{title}»\nНовый текст (или «-» чтобы оставить как есть):",
+        reply_markup=cancel_kb(),
+    )
     await callback.answer()
 
 
@@ -501,34 +888,83 @@ async def task_edit_title(message: Message, state: FSMContext) -> None:
     text = message.text.strip()
     await state.update_data(new_title=None if text == "-" else text)
     await state.set_state(TaskFSM.edit_priority)
-    await message.answer(
+    await wiz_reply(message, 
         "Новый приоритет, дата или без изменений:",
         reply_markup=_priority_kb("edit", with_keep=True, with_date=True),
     )
 
 
-# Смена категории из напоминания
+async def _task_title(task_id: int) -> str:
+    """Название задачи для подписи в мастерах редактирования."""
+    async with async_session_factory() as session:
+        t = await task_service.get_task(session, task_id)
+    return t.title if t else f"#{task_id}"
+
+
+async def _delete_message_safe(bot, chat_id: int, message_id: int) -> None:
+    """Тихо удаляет сообщение (напр. напоминание), не падая на «уже удалено»."""
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+    _PANELS.pop(chat_id, None)
+
+
+def _is_reminder_message(message) -> bool:
+    """Отличает сообщение-напоминание о задаче от карточки задачи (по тексту).
+
+    Кнопки у них одинаковые (taskdone/taskcat/taskdate), но для напоминания после
+    действия сообщение нужно удалить, а карточку в разделе «Задачи» — оставить.
+    """
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "")
+    return text.startswith("Скоро срок задачи") or text.startswith("Сегодня срок задачи")
+
+
+def _remind_data(callback, tid: int) -> dict:
+    """Базовые данные FSM для правки задачи; для напоминания — координаты сообщения."""
+    data = {"edit_id": tid, "new_title": None}
+    if _is_reminder_message(callback.message):
+        data["remind_chat"] = callback.message.chat.id
+        data["remind_msg"] = callback.message.message_id
+    return data
+
+
+# Смена категории (из карточки задачи или из напоминания)
 @router.callback_query(F.data.startswith("taskcat:"))
 async def task_reassign_category(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(edit_id=int(callback.data.split(":", 1)[1]), new_title=None)
+    await state.clear()
+    tid = int(callback.data.split(":", 1)[1])
+    title = await _task_title(tid)
+    await state.update_data(**_remind_data(callback, tid))
     await state.set_state(TaskFSM.edit_priority)
-    await callback.message.answer("Новая категория задачи:", reply_markup=_priority_kb("edit", with_date=True))
+    await edit_or_send(
+        callback.message,
+        f"Задача: «{title}»\nНовая категория (приоритет/срок):",
+        reply_markup=_priority_kb("edit", with_date=True),
+    )
     await callback.answer()
 
 
-# Перенос на дату из напоминания
+# Перенос на дату (из карточки задачи или из напоминания)
 @router.callback_query(F.data.startswith("taskdate:"))
 async def task_reassign_date(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(edit_id=int(callback.data.split(":", 1)[1]), new_title=None)
+    await state.clear()
+    tid = int(callback.data.split(":", 1)[1])
+    title = await _task_title(tid)
+    await state.update_data(**_remind_data(callback, tid))
     await state.set_state(TaskFSM.edit_date)
-    await callback.message.answer("Новая дата задачи в формате ДД.ММ.ГГГГ:")
+    await edit_or_send(
+        callback.message,
+        f"Задача: «{title}»\nНовая дата в формате ДД.ММ.ГГГГ:",
+        reply_markup=cancel_kb(),
+    )
     await callback.answer()
 
 
 @router.callback_query(TaskFSM.edit_priority, F.data == "tp:edit:date")
 async def task_edit_pick_date(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(TaskFSM.edit_date)
-    await callback.message.answer("Новая дата задачи в формате ДД.ММ.ГГГГ:")
+    await edit_or_send(callback.message, "Новая дата задачи в формате ДД.ММ.ГГГГ:", reply_markup=cancel_kb())
     await callback.answer()
 
 
@@ -536,7 +972,7 @@ async def task_edit_pick_date(callback: CallbackQuery, state: FSMContext) -> Non
 async def task_edit_date(message: Message, state: FSMContext) -> None:
     due = _parse_date(message.text)
     if due is None:
-        await message.answer("❌ Формат ДД.ММ.ГГГГ. Повторите:")
+        await wiz_reply(message, "❌ Формат ДД.ММ.ГГГГ. Повторите:", reply_markup=cancel_kb())
         return
     data = await state.get_data()
     async with async_session_factory() as session:
@@ -545,7 +981,14 @@ async def task_edit_date(message: Message, state: FSMContext) -> None:
         await task_service.set_due_date(session, data["edit_id"], due)
         await session.commit()
     await state.clear()
-    await message.answer(f"✅ Задача перенесена на {due.strftime('%d.%m.%Y')}.", reply_markup=main_menu())
+    done_text = f"✅ Задача перенесена на {due.strftime('%d.%m.%Y')}."
+    if data.get("remind_msg"):
+        # Из напоминания: убираем сообщение-напоминание; краткое подтверждение БЕЗ меню
+        # (иначе меню оставалось бы в чате и «спамило» его).
+        await _delete_message_safe(message.bot, data["remind_chat"], data["remind_msg"])
+        await message.answer(done_text)
+    else:
+        await wiz_reply(message, done_text, reply_markup=main_menu_kb())
 
 
 @router.callback_query(TaskFSM.edit_priority, F.data.startswith("tp:edit:"))
@@ -559,7 +1002,12 @@ async def task_edit_priority(callback: CallbackQuery, state: FSMContext) -> None
         )
         await session.commit()
     await state.clear()
-    await callback.message.answer("✅ Задача изменена.", reply_markup=main_menu())
+    if data.get("remind_msg"):
+        # Из напоминания: удаляем сообщение-напоминание, подтверждение — тостом (без меню).
+        await _delete_message_safe(callback.message.bot, callback.message.chat.id, callback.message.message_id)
+        await callback.answer("✅ Категория изменена")
+        return
+    await edit_or_send(callback.message, "✅ Задача изменена.", reply_markup=main_menu_kb())
     await callback.answer()
 
 
@@ -571,50 +1019,252 @@ async def task_delete(callback: CallbackQuery) -> None:
         await task_service.delete_task(session, task_id)
         await session.commit()
     await callback.answer("Задача удалена")
+    _back = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ К списку задач", callback_data="tasks:edit")]])
     try:
-        await callback.message.edit_text("🗑 Задача удалена.")
+        await callback.message.edit_text("🗑 Задача удалена.", reply_markup=_back)
     except Exception:
-        pass
+        await edit_or_send(callback.message, "🗑 Задача удалена.", reply_markup=_back)
 
 
 @router.callback_query(F.data.startswith("taskdone:"))
 async def task_done(callback: CallbackQuery) -> None:
     task_id = int(callback.data.split(":", 1)[1])
+    from_reminder = _is_reminder_message(callback.message)
     async with async_session_factory() as session:
         await task_service.mark_done(session, task_id)
         await session.commit()
-    await callback.answer("Задача выполнена")
+    await callback.answer("✅ Задача выполнена")
+    if from_reminder:
+        # Из напоминания: удаляем сообщение, чтобы оно не копилось в чате.
+        await _delete_message_safe(callback.message.bot, callback.message.chat.id, callback.message.message_id)
+        return
+    _back = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ К списку задач", callback_data="tasks:edit")]])
     try:
-        await callback.message.edit_text("✅ Задача отмечена выполненной.")
+        await callback.message.edit_text("✅ Задача отмечена выполненной.", reply_markup=_back)
     except Exception:
-        pass
+        await edit_or_send(callback.message, "✅ Задача отмечена выполненной.", reply_markup=_back)
+
+
+# --- Редактирование адресата задачи ---------------------------------------
+@router.callback_query(F.data.startswith("taskasg:"))
+async def task_edit_assignee_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    tid = int(callback.data.split(":", 1)[1])
+    await edit_or_send(callback.message, "Кому адресовать задачу?", reply_markup=_assignee_kb(f"easg:{tid}"))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("easg:"))
+async def task_edit_assignee_set(callback: CallbackQuery, state: FSMContext) -> None:
+    _, raw_tid, code = callback.data.split(":")
+    tid = int(raw_tid)
+    if code == "text":
+        await state.update_data(edit_id=tid)
+        await state.set_state(TaskFSM.edit_assignee_text)
+        await edit_or_send(callback.message, "Введите имя адресата:", reply_markup=cancel_kb())
+        await callback.answer()
+        return
+    assignee = None if code == "none" else _ASSIGNEES.get(code)
+    async with async_session_factory() as session:
+        await task_service.update_task(session, tid, assignee=assignee)
+        await session.commit()
+    await callback.answer("Адресат обновлён")
+    await _open_task_card(callback.message, tid)
+
+
+@router.message(TaskFSM.edit_assignee_text)
+async def task_edit_assignee_text(message: Message, state: FSMContext) -> None:
+    name = message.text.strip()
+    if not name:
+        await wiz_reply(message, "❌ Имя не может быть пустым. Повторите:", reply_markup=cancel_kb())
+        return
+    data = await state.get_data()
+    async with async_session_factory() as session:
+        await task_service.update_task(session, data["edit_id"], assignee=name)
+        await session.commit()
+    await state.clear()
+    await _open_task_card(message, data["edit_id"])
+
+
+async def _open_task_card(message: Message, task_id: int) -> None:
+    """Перерисовывает карточку задачи (после правки адресата)."""
+    async with async_session_factory() as session:
+        t = await task_service.get_task(session, task_id)
+    if t is None:
+        await wiz_reply(message, "Задача не найдена.", reply_markup=main_menu_kb())
+        return
+    due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
+    icon = task_service.due_color_icon(t.due_date)
+    text = (
+        f"<b>Задача</b>\n{icon} {t.title}\n"
+        f"Категория: {task_service.PRIORITY_TEXT.get(t.priority, '')}\n"
+        f"Адресат: {_assignee_label(t.assignee)}\nСрок: {due} ({_due_human(t.due_date)}) · статус: {t.status.value}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"taskdone:{t.id}"),
+         InlineKeyboardButton(text="🗑 Удалить", callback_data=f"taskdel:{t.id}")],
+        [InlineKeyboardButton(text="🏷 Категория", callback_data=f"taskcat:{t.id}"),
+         InlineKeyboardButton(text="📅 Дата", callback_data=f"taskdate:{t.id}")],
+        [InlineKeyboardButton(text="👤 Адресат", callback_data=f"taskasg:{t.id}")],
+        [InlineKeyboardButton(text="◀️ К списку", callback_data="tasks:edit")],
+    ])
+    await wiz_reply(message, text, reply_markup=kb)
+
+
+# --- Выполненные задачи ----------------------------------------------------
+@router.callback_query(F.data == "tasks:done")
+async def tasks_done_list(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        tasks = await task_service.list_done_tasks(session, lid) if lid else []
+    lines = ["<b>✅ Выполненные задачи</b> (хранятся до удаления; нажмите № чтобы удалить):"]
+    if not tasks:
+        lines.append("— пусто")
+    for i, t in enumerate(tasks, start=1):
+        lines.append(f"{i}. {t.title} · {_assignee_label(t.assignee)}")
+    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"tddel:{t.id}") for i, t in enumerate(tasks, start=1)]
+    rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    rows.append([InlineKeyboardButton(text="◀️ К задачам", callback_data="menu:tasks")])
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tddel:"))
+async def task_done_delete(callback: CallbackQuery, state: FSMContext) -> None:
+    task_id = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        await task_service.delete_task(session, task_id)
+        await session.commit()
+    await callback.answer("Удалена")
+    await tasks_done_list(callback, state)
 
 
 # --- Ручная отметка оплаты от арендатора -----------------------------------
-@router.message(F.text == "💰 Отметить оплату")
-async def payment_manual_menu(message: Message) -> None:
+@router.callback_query(F.data == "menu:pay")
+async def payment_manual_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     async with async_session_factory() as session:
-        lid = await _landlord_id(session, message.from_user.id)
+        lid = await _landlord_id(session, callback.from_user.id)
         rows = (await session.execute(
             select(Lease.id, Lease.contract_no, Tenant.name)
             .join(Tenant, Tenant.id == Lease.tenant_id)
             .where(Tenant.landlord_id == lid, Lease.status == LeaseStatus.active)
         )).all() if lid else []
     if not rows:
-        await message.answer("Активных договоров нет.")
+        await edit_or_send(callback.message, "Активных договоров нет.", reply_markup=back_kb())
+        await callback.answer()
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{name} · №{contract}", callback_data=f"pm:{lid}")]
-        for lid, contract, name in rows
-    ])
-    await message.answer("Выберите договор для отметки оплаты:", reply_markup=kb)
+    kb_rows = [
+        [InlineKeyboardButton(text=f"{name} · №{contract}", callback_data=f"pm:{lease_id}")]
+        for lease_id, contract, name in rows
+    ]
+    kb_rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")])
+    await edit_or_send(callback.message, "Выберите договор для отметки оплаты:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await callback.answer()
+
+
+_CHARGE_TYPE_LABEL = {
+    ChargeType.rent: "Аренда",
+    ChargeType.electricity: "Электричество",
+    ChargeType.penalty: "Пеня",
+    ChargeType.other: "Прочее",
+}
 
 
 @router.callback_query(F.data.startswith("pm:"))
 async def payment_manual_pick(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(lease_id=int(callback.data.split(":", 1)[1]))
+    """После выбора договора — что оплачиваем: конкретное начисление или всю сумму."""
+    lease_id = int(callback.data.split(":", 1)[1])
+    await state.update_data(lease_id=lease_id)
+    period = billing_service.period_start(date.today())
+    async with async_session_factory() as session:
+        # До-начисляем аренду (и электричество, если есть показания) за текущий месяц,
+        # чтобы их можно было отметить оплаченными, даже если начисления ещё не сгенерированы.
+        lease = await session.get(Lease, lease_id)
+        if lease is not None:
+            await billing_service.create_rent_charge(session, lease, period)
+            await billing_service.create_electricity_charge(session, lease, period)
+            await session.commit()
+        charges = (await session.execute(
+            select(Charge).where(Charge.lease_id == lease_id).order_by(Charge.period, Charge.type)
+        )).scalars().all()
+    rows: list[list[InlineKeyboardButton]] = []
+    for c in charges:
+        outstanding = c.amount - c.paid_amount
+        if outstanding <= 0:
+            continue
+        label = f"{_CHARGE_TYPE_LABEL.get(c.type, c.type.value)} {c.period.strftime('%m.%Y')}: {outstanding} ₽"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"payc:{c.id}")])
+    rows.append([InlineKeyboardButton(text="💰 Произвольная сумма", callback_data=f"paylump:{lease_id}")])
+    rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")])
+    hint = "Выберите начисление к оплате или «Произвольная сумма»:" if len(rows) > 2 else \
+        "Открытых начислений нет. Можно отметить произвольную сумму:"
+    await edit_or_send(callback.message, hint, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("paylump:"))
+async def payment_lump_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(pay_mode="lump", lease_id=int(callback.data.split(":", 1)[1]))
     await state.set_state(PayFSM.amount)
-    await callback.message.answer("Введите сумму поступившей оплаты, ₽:")
+    await edit_or_send(callback.message, "Введите сумму поступившей оплаты, ₽:", reply_markup=cancel_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("payc:"))
+async def payment_charge_start(callback: CallbackQuery, state: FSMContext) -> None:
+    charge_id = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        charge = await session.get(Charge, charge_id)
+    if charge is None:
+        await callback.answer("Начисление не найдено", show_alert=True)
+        return
+    outstanding = charge.amount - charge.paid_amount
+    await state.update_data(pay_mode="charge", charge_id=charge_id)
+    await state.set_state(PayFSM.amount)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Оплатить полностью ({outstanding} ₽)", callback_data=f"payfull:{charge_id}")],
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")],
+    ])
+    label = _CHARGE_TYPE_LABEL.get(charge.type, charge.type.value)
+    await edit_or_send(
+        callback.message,
+        f"Оплата «{label}» за {charge.period.strftime('%m.%Y')} (остаток {outstanding} ₽).\n"
+        f"Введите сумму или нажмите «Оплатить полностью»:",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+async def _finish_charge_payment(message: Message, tg_id: int, state: FSMContext, charge_id: int, amount: Decimal) -> None:
+    async with async_session_factory() as session:
+        user = (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one_or_none()
+        charge = await session.get(Charge, charge_id)
+        if charge is None:
+            await state.clear()
+            await wiz_reply(message, "❌ Начисление не найдено.", reply_markup=main_menu_kb())
+            return
+        label = _CHARGE_TYPE_LABEL.get(charge.type, charge.type.value)
+        result = await payment_service.pay_charge(
+            session, charge, amount, confirmed_by_id=user.id if user else None, today=date.today()
+        )
+        await session.commit()
+    await state.clear()
+    note = "закрыто полностью" if result["fully_paid"] else f"остаток {result['remaining']} ₽"
+    await wiz_reply(message, f"✅ Оплата «{label}» {result['allocated']} ₽ отмечена ({note}).", reply_markup=main_menu_kb())
+
+
+@router.callback_query(F.data.startswith("payfull:"))
+async def payment_charge_full(callback: CallbackQuery, state: FSMContext) -> None:
+    charge_id = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        charge = await session.get(Charge, charge_id)
+    if charge is None:
+        await callback.answer("Начисление не найдено", show_alert=True)
+        return
+    outstanding = charge.amount - charge.paid_amount
+    await _finish_charge_payment(callback.message, callback.from_user.id, state, charge_id, outstanding)
     await callback.answer()
 
 
@@ -622,9 +1272,12 @@ async def payment_manual_pick(callback: CallbackQuery, state: FSMContext) -> Non
 async def payment_manual_save(message: Message, state: FSMContext) -> None:
     amount = _parse_amount(message.text)
     if amount is None or amount <= 0:
-        await message.answer("❌ Введите положительную сумму. Повторите:")
+        await wiz_reply(message, "❌ Введите положительную сумму. Повторите:", reply_markup=cancel_kb())
         return
     data = await state.get_data()
+    if data.get("pay_mode") == "charge":
+        await _finish_charge_payment(message, message.from_user.id, state, data["charge_id"], amount)
+        return
     async with async_session_factory() as session:
         user = (await session.execute(select(User).where(User.tg_id == message.from_user.id))).scalar_one_or_none()
         payment = await payment_service.register_payment(
@@ -641,24 +1294,155 @@ async def payment_manual_save(message: Message, state: FSMContext) -> None:
         note = "начисления закрыты полностью"
     else:
         note = f"частично, остаток {result.get('remaining_debt')} ₽"
-    await message.answer(f"✅ Оплата {amount} ₽ отмечена ({note}). Арендатор уведомлён.", reply_markup=main_menu())
+    await wiz_reply(message, f"✅ Оплата {amount} ₽ отмечена ({note}). Арендатор уведомлён.", reply_markup=main_menu_kb())
 
 
 # --- Отчёты ----------------------------------------------------------------
-@router.message(F.text == "📊 Отчёты")
-async def reports(message: Message) -> None:
-    async with async_session_factory() as session:
-        lid = await _landlord_id(session, message.from_user.id)
-        if lid is None:
-            await message.answer("Нет данных.")
-            return
-        by_prem = await report_service.payments_by_premises(session, lid)
-        elec = await report_service.electricity_summary(session, lid, date.today())
+_MONTHS_RU = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+              "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
 
-    lines = ["<b>Платежи по помещениям (подтверждённые):</b>"]
-    lines += [f"• {r['premises']}: {r['confirmed_total']} ₽" for r in by_prem] or ["— нет"]
-    lines.append("\n<b>Электричество за текущий месяц:</b>")
-    lines += [
-        f"• {r['premises']}: {r['consumption_kwh']} кВт·ч = {r['amount']} ₽" for r in elec
-    ] or ["— нет"]
-    await message.answer("\n".join(lines), reply_markup=main_menu())
+
+def _period_code(period: date) -> str:
+    return f"{period.year:04d}{period.month:02d}"
+
+
+def _period_from_code(code: str) -> date:
+    return date(int(code[:4]), int(code[4:6]), 1)
+
+
+def _period_ru(period: date) -> str:
+    return f"{_MONTHS_RU[period.month]} {period.year}"
+
+
+def _report_nav_kb(code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 По помещениям", callback_data=f"rep:prem:{code}"),
+         InlineKeyboardButton(text="⚡ Электричество", callback_data=f"rep:elec:{code}")],
+        [InlineKeyboardButton(text="🔴 Должники", callback_data=f"rep:debt:{code}"),
+         InlineKeyboardButton(text="📅 Другой месяц", callback_data="rep:years")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
+    ])
+
+
+def _report_back_kb(code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ К сводке", callback_data=f"rep:main:{code}")],
+        [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
+    ])
+
+
+@router.callback_query(F.data == "menu:reports")
+async def reports(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _show_report_main(callback, _period_code(date.today()))
+
+
+@router.callback_query(F.data.startswith("rep:main:"))
+async def report_main(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _show_report_main(callback, callback.data.split(":")[2])
+
+
+async def _show_report_main(callback: CallbackQuery, code: str) -> None:
+    period = _period_from_code(code)
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        if lid is None:
+            await edit_or_send(callback.message, "Нет данных.", reply_markup=back_kb())
+            await callback.answer()
+            return
+        s = await report_service.monthly_summary(session, lid, period)
+    lines = [
+        f"<b>📊 Сводка за {_period_ru(period)}</b>",
+        f"💰 Доход (оплачено): {s['income']} ₽",
+        f"💸 Расход: {s['expense']} ₽",
+        f"⚡ Электричество (начислено): {s['electricity']} ₽",
+        f"🔴 Должников: {s['debtors']} из {s['leases']}" + (f" · долг {s['total_debt']} ₽" if s['total_debt'] > 0 else ""),
+    ]
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_report_nav_kb(code))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rep:prem:"))
+async def report_premises(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    code = callback.data.split(":")[2]
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        by_prem = await report_service.payments_by_premises(session, lid) if lid else []
+    lines = [f"<b>🏠 Платежи по помещениям — {_period_ru(_period_from_code(code))}</b>"]
+    lines += [f"• {r['premises']}: {r['confirmed_total']} ₽" for r in by_prem] or ["— нет подтверждённых платежей"]
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_report_back_kb(code))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rep:elec:"))
+async def report_electricity(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    code = callback.data.split(":")[2]
+    period = _period_from_code(code)
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        rows = await report_service.electricity_status(session, lid, period) if lid else []
+
+    lines = [f"<b>⚡ Электричество — {_period_ru(period)}</b>"]
+    if not rows:
+        lines.append("— нет помещений со счётчиками")
+    no_reading = [r["premises"] for r in rows if not r["has_reading"]]
+    with_reading = [r for r in rows if r["has_reading"]]
+    for r in with_reading:
+        if r["charged"] <= 0:
+            mark, tail = "•", "начисление не сформировано"
+        elif r["is_paid"]:
+            mark, tail = "✅", f"{r['charged']} ₽ — оплачено"
+        else:
+            mark, tail = "❌", f"{r['charged']} ₽ — долг {r['debt']} ₽"
+        lines.append(f"{mark} {r['premises']}: {r['consumption']} кВт·ч · {tail}")
+    if no_reading:
+        lines.append("\n⏳ <b>Нет замера за месяц:</b> " + ", ".join(no_reading))
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_report_back_kb(code))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rep:debt:"))
+async def report_debtors(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    code = callback.data.split(":")[2]
+    period = _period_from_code(code)
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        status = await report_service.tenant_payment_status(session, lid, period) if lid else {"rows": [], "total_debt": 0}
+    debtors = [r for r in status["rows"] if r["debt"] > 0]
+    lines = [f"<b>🔴 Должники — {_period_ru(period)}</b>"]
+    if not debtors:
+        lines.append("— нет должников 🎉")
+    for r in debtors:
+        phone = f" · 📞 {r['phone']}" if r.get("phone") else ""
+        detail = f"\n   не оплачено: {r['unpaid_detail']}" if r.get("unpaid_detail") else ""
+        lines.append(f"❌ {r['tenant']} · {r['premises']}: долг {r['debt']} ₽{phone}{detail}")
+    if status["total_debt"] > 0:
+        lines.append(f"\n<b>Итого долг: {status['total_debt']} ₽</b>")
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_report_back_kb(code))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "rep:years")
+async def report_pick_year(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    cur = date.today().year
+    years = [cur - 2, cur - 1, cur, cur + 1]
+    rows = [[InlineKeyboardButton(text=str(y), callback_data=f"rep:months:{y}") for y in years]]
+    rows.append([InlineKeyboardButton(text="◀️ К сводке", callback_data=f"rep:main:{_period_code(date.today())}")])
+    await edit_or_send(callback.message, "Выберите год:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rep:months:"))
+async def report_pick_month(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    year = int(callback.data.split(":")[2])
+    buttons = [InlineKeyboardButton(text=_MONTHS_RU[m][:3], callback_data=f"rep:main:{year:04d}{m:02d}") for m in range(1, 13)]
+    rows = [buttons[i:i + 4] for i in range(0, 12, 4)]
+    rows.append([InlineKeyboardButton(text="◀️ Год", callback_data="rep:years")])
+    await edit_or_send(callback.message, f"Выберите месяц {year}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()

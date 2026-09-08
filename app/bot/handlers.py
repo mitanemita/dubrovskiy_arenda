@@ -4,11 +4,13 @@ from __future__ import annotations
 from datetime import date
 
 from aiogram import F, Router
-from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from sqlalchemy import select
 
-from app.bot.keyboards import CB_PAY
+from app.bot.handlers_admin import show_main_menu
+from app.bot.keyboards import CB_PAY, MENU_SECTIONS
 from app.config import get_settings
 from app.db.base import async_session_factory
 from app.db.models import Payment, User
@@ -16,6 +18,10 @@ from app.services import confirmation_service
 from app.utils.logger import logger
 
 router = Router()
+
+# Метка версии интерфейса бота. Видна в /start и /version — по ней сразу понятно,
+# запущена ли на сервере новая сборка (инлайн-меню) или старый образ.
+BOT_UI_VERSION = "inline-menu-2026.09.08.21"
 
 
 async def _is_allowed(session, tg_id: int) -> bool:
@@ -29,16 +35,33 @@ async def _is_allowed(session, tg_id: int) -> bool:
 
 
 @router.message(Command("start"))
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
     async with async_session_factory() as session:
         allowed = await _is_allowed(session, message.from_user.id)
     if not allowed:
-        await message.answer("⛔ Доступ запрещён. Обратитесь к администратору.")
+        await message.answer("⛔ Доступ запрещён. Обратитесь к администратору.", reply_markup=ReplyKeyboardRemove())
         return
-    await message.answer(
-        "👋 Бот учёта аренды.\n"
-        "Сюда приходят платежи на подтверждение и уведомления о нехватке данных."
-    )
+    # Убираем старую reply-клавиатуру (она «залипает» в чате Telegram),
+    # затем показываем инлайн-меню.
+    await message.answer(f"👋 Бот учёта аренды. (v: {BOT_UI_VERSION})", reply_markup=ReplyKeyboardRemove())
+    await show_main_menu(message)
+
+
+@router.message(Command("version"))
+async def cmd_version(message: Message) -> None:
+    """Показывает версию UI бота — чтобы проверить, что запущена новая сборка."""
+    await message.answer(f"Версия интерфейса: {BOT_UI_VERSION}", reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(StateFilter(None), F.text.in_(set(MENU_SECTIONS.values())))
+async def legacy_reply_button(message: Message, state: FSMContext) -> None:
+    """Совместимость: нажата кнопка старой reply-клавиатуры (вне активного ввода).
+
+    Убираем залипшую клавиатуру и открываем актуальное инлайн-меню.
+    """
+    await message.answer("Меню теперь под сообщением 👇", reply_markup=ReplyKeyboardRemove())
+    await show_main_menu(message)
 
 
 @router.callback_query(F.data.startswith(f"{CB_PAY}:"))

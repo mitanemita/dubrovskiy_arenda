@@ -215,3 +215,81 @@ async def generate_upd(
     )
     session.add(doc)
     return doc
+
+
+def _bank_block(landlord: Landlord) -> str:
+    """Блок реквизитов для оплаты (в теле письма)."""
+    lines = [f"{landlord.name}, ИНН {landlord.inn}"]
+    if landlord.bank_name:
+        lines.append(f"Банк: {landlord.bank_name}" + (f", БИК {landlord.bik}" if landlord.bik else ""))
+    if landlord.account:
+        lines.append(f"Р/с {landlord.account}" + (f", К/с {landlord.corr_account}" if landlord.corr_account else ""))
+    return "\n".join(lines)
+
+
+async def upd_email_package(session: AsyncSession, lease_id: int, period: date, kind: ChargeType) -> dict:
+    """Готовит письмо с УПД: адрес, тема, формальный текст (под арендатора), PDF."""
+    period = period_start(period)
+    context = await build_upd_context(session, lease_id, period, kind)
+    pdf = render.render_pdf("upd.html", context)
+    lease, tenant, premises, landlord = await _load_bundle(session, lease_id)
+    number = context["number"]
+    subject = f"УПД № {number} по договору аренды № {lease.contract_no}"
+    body = (
+        f"Здравствуйте, {tenant.name}!\n\n"
+        f"Направляем универсальный передаточный документ (УПД) № {number} "
+        f"от {context['doc_date_str']} по договору аренды № {lease.contract_no} "
+        f"от {ctx.date_dmy(lease.contract_date)} за {ctx.period_ru(period)}\n"
+        f"Сумма: {context['total']} ₽ ({context['total_words']}).\n\n"
+        f"Реквизиты для оплаты:\n{_bank_block(landlord)}\n\n"
+        f"С уважением,\n{landlord.name}"
+    )
+    filename = f"{number.replace('/', '-')}.pdf"
+    meta = {
+        "document_type": "upd",
+        "kind": kind.value,  # rent | electricity
+        "number": number,
+        "tenant_name": tenant.name,
+        "tenant_email": tenant.email,
+        "contract_no": lease.contract_no,
+        "period": period.strftime("%Y-%m"),
+        "period_human": ctx.period_ru(period),
+        "amount": str(context["total"]),
+        "landlord_name": landlord.name,
+    }
+    return {"to": tenant.email, "subject": subject, "body": body, "pdf": pdf, "filename": filename, "meta": meta}
+
+
+async def receipt_email_package(session: AsyncSession, lease_id: int, period: date, today: date | None = None) -> dict:
+    """Готовит письмо с квитанцией: адрес, тема, формальный текст, PDF."""
+    period = period_start(period)
+    context = await build_receipt_context(session, lease_id, period, today)
+    pdf = render.render_pdf("receipt.html", context)
+    lease, tenant, premises, landlord = await _load_bundle(session, lease_id)
+    subject = f"Квитанция на оплату аренды за {ctx.period_ru(period)} (договор № {lease.contract_no})"
+    overdue_note = ""
+    if context.get("overdue"):
+        overdue_note = f"\n⚠️ По договору имеется просрочка ({context['days_overdue']} дн.), начислена пеня."
+    body = (
+        f"Здравствуйте, {tenant.name}!\n\n"
+        f"Направляем квитанцию на оплату по договору аренды № {lease.contract_no} "
+        f"за {ctx.period_ru(period)}\n"
+        f"Сумма к оплате: {context['total']} ₽ ({context['total_words']}).\n"
+        f"Оплату просим произвести до {context['due_str']}.{overdue_note}\n\n"
+        f"Реквизиты для оплаты:\n{_bank_block(landlord)}\n\n"
+        f"С уважением,\n{landlord.name}"
+    )
+    filename = f"Квитанция_{lease.contract_no.replace('/', '-')}_{period.strftime('%Y-%m')}.pdf"
+    meta = {
+        "document_type": "receipt",
+        "tenant_name": tenant.name,
+        "tenant_email": tenant.email,
+        "contract_no": lease.contract_no,
+        "period": period.strftime("%Y-%m"),
+        "period_human": ctx.period_ru(period),
+        "amount": str(context["total"]),
+        "due_date": context["due_str"],
+        "overdue": bool(context.get("overdue")),
+        "landlord_name": landlord.name,
+    }
+    return {"to": tenant.email, "subject": subject, "body": body, "pdf": pdf, "filename": filename, "meta": meta}

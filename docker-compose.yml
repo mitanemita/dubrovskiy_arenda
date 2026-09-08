@@ -71,6 +71,12 @@ services:
       N8N_BASIC_AUTH_ACTIVE: "true"
       N8N_BASIC_AUTH_USER: ${N8N_USER:-admin}
       N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD:-changeme}
+      # Доступ к UI по http (без TLS): при входе с IP-адреса n8n блокирует secure-cookie.
+      # true (по умолчанию) — безопасно, вход по https или через SSH-туннель на localhost.
+      # false — разрешить вход по http напрямую (только для доверенной сети).
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-true}
+      # Ключ email-API для отправки писем по HTTPS (используется воркфлоу Brevo).
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
     volumes:
       - n8n_data:/home/node/.n8n
 

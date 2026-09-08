@@ -21,7 +21,7 @@ from app.services import (
     settings_service,
     task_service,
 )
-from app.services.task_service import PRIORITY_LABEL
+from app.services.task_service import due_color_icon
 
 
 async def generate_fixed_expenses(session: AsyncSession, today: date) -> dict:
@@ -139,14 +139,16 @@ async def generate_task_reminders(session: AsyncSession, today: date) -> int:
         lead = task_service.LEAD_DAYS.get(task.priority, 1)
         pre_day = due - timedelta(days=lead)
         due_str = due.strftime("%d.%m.%Y")
+        # Цвет — по остатку дней до срока (а не по категории задачи).
+        icon = due_color_icon(due, today)
 
         # Предварительное напоминание (за N дней)
         if not task.remind_pre_sent and pre_day <= today < due:
             await notification_service.enqueue(
                 session, landlord_id=task.landlord_id, channel=NotifChannel.telegram,
                 type="task_reminder",
-                subject=f"Скоро срок задачи ({PRIORITY_LABEL.get(task.priority, '')})",
-                body=f"{task.title}\nСрок: {due_str}" + (f"\n{task.description}" if task.description else ""),
+                subject=f"Скоро срок задачи {icon}",
+                body=f"{icon} {task.title}\nСрок: {due_str}" + (f"\n{task.description}" if task.description else ""),
                 related_task_id=task.id,
             )
             task.remind_pre_sent = True
@@ -157,8 +159,8 @@ async def generate_task_reminders(session: AsyncSession, today: date) -> int:
             await notification_service.enqueue(
                 session, landlord_id=task.landlord_id, channel=NotifChannel.telegram,
                 type="task_reminder",
-                subject=f"Сегодня срок задачи ({PRIORITY_LABEL.get(task.priority, '')})",
-                body=f"{task.title}\nСрок: {due_str}" + (f"\n{task.description}" if task.description else ""),
+                subject=f"Сегодня срок задачи {icon}",
+                body=f"{icon} {task.title}\nСрок: {due_str}" + (f"\n{task.description}" if task.description else ""),
                 related_task_id=task.id,
             )
             task.remind_due_sent = True

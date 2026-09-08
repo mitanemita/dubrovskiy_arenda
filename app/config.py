@@ -30,11 +30,27 @@ class Settings(BaseSettings):
     db_password: str = Field(default="", alias="DB_PASSWORD")
     db_name: str = Field(default="arenda", alias="DB_NAME")
 
-    # --- Почта (SMTP для отправки, IMAP при необходимости приёма) ---
+    # --- Почта ---
+    # Транспорт (EMAIL_PROVIDER), все API-варианты работают по HTTPS (443):
+    #   smtp (по умолчанию) | n8n | gmail | brevo | sendgrid | resend
+    email_provider: str = Field(default="smtp", alias="EMAIL_PROVIDER")
+    email_api_key: str = Field(default="", alias="EMAIL_API_KEY")
+    email_from: str = Field(default="", alias="EMAIL_FROM")  # адрес отправителя; если пусто — email_login
+    # n8n-транспорт: бот POST-ит письмо в вебхук n8n, n8n шлёт через свою ноду.
+    email_n8n_url: str = Field(default="", alias="EMAIL_N8N_URL")
+    # Gmail API (OAuth2): без телефона/домена, работает из РФ по 443.
+    gmail_client_id: str = Field(default="", alias="GMAIL_CLIENT_ID")
+    gmail_client_secret: str = Field(default="", alias="GMAIL_CLIENT_SECRET")
+    gmail_refresh_token: str = Field(default="", alias="GMAIL_REFRESH_TOKEN")
     smtp_server: str = Field(default="smtp.gmail.com", alias="SMTP_SERVER")
     smtp_port: int = Field(default=465, alias="SMTP_PORT")
     email_login: str = Field(default="", alias="EMAIL_LOGIN")
     email_password: str = Field(default="", alias="EMAIL_PASSWORD")
+
+    @property
+    def sender_email(self) -> str:
+        """Адрес отправителя для писем (API/SMTP)."""
+        return self.email_from or self.email_login
 
     # --- Вебхуки n8n (общий секрет для авторизации входящих запросов) ---
     webhook_token: str = Field(default="", alias="WEBHOOK_TOKEN")
