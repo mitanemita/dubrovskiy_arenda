@@ -607,13 +607,6 @@ def _tasks_menu_kb() -> InlineKeyboardMarkup:
     ])
 
 
-_PRIORITY_ICON = {
-    task_service.TaskPriority.high: "🔴",
-    task_service.TaskPriority.medium: "🟡",
-    task_service.TaskPriority.low: "🟢",
-}
-
-
 def _due_human(due) -> str:
     """Человекочитаемый остаток до срока: реальные дни, а не «окно приоритета»."""
     if due is None:
@@ -628,7 +621,7 @@ def _due_human(due) -> str:
 
 def _task_line(idx: int, t) -> str:
     due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
-    icon = _PRIORITY_ICON.get(t.priority, "")
+    icon = task_service.due_color_icon(t.due_date)
     return f"{idx}. {icon} {t.title} · {_assignee_label(t.assignee)} · до {due} ({_due_human(t.due_date)})"
 
 
@@ -646,7 +639,7 @@ async def tasks_recent(callback: CallbackQuery, state: FSMContext) -> None:
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         tasks = await task_service.list_tasks(session, lid) if lid else []
-    lines = ["<b>📋 Ближайшие задачи:</b>"]
+    lines = ["<b>📋 Ближайшие задачи:</b>", f"<i>{task_service.DUE_COLOR_LEGEND}</i>"]
     if not tasks:
         lines.append("— пусто")
     for i, t in enumerate(tasks[:10], start=1):
@@ -679,7 +672,7 @@ async def tasks_edit_list(callback: CallbackQuery, state: FSMContext) -> None:
     offset = max(0, min(offset, (total - 1) // _TASKS_PAGE * _TASKS_PAGE if total else 0))
     page = tasks[offset:offset + _TASKS_PAGE]
 
-    lines = ["<b>✏️ Редактирование задач</b>"]
+    lines = ["<b>✏️ Редактирование задач</b>", f"<i>{task_service.DUE_COLOR_LEGEND}</i>"]
     if not tasks:
         lines.append("— пусто")
     else:
@@ -718,11 +711,13 @@ async def task_pick(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Задача не найдена", show_alert=True)
         return
     due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
+    icon = task_service.due_color_icon(t.due_date)
     text = (
         f"<b>Задача</b>\n"
-        f"{task_service.PRIORITY_LABEL.get(t.priority, '')} {t.title}\n"
+        f"{icon} {t.title}\n"
+        f"Категория: {task_service.PRIORITY_TEXT.get(t.priority, '')}\n"
         f"Адресат: {_assignee_label(t.assignee)}\n"
-        f"Срок: {due} · статус: {t.status.value}"
+        f"Срок: {due} ({_due_human(t.due_date)}) · статус: {t.status.value}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"taskdone:{t.id}"),
@@ -906,7 +901,67 @@ async def _task_title(task_id: int) -> str:
     return t.title if t else f"#{task_id}"
 
 
-# Смена категории из напоминания
+# --- Действия из напоминания (rt…): по завершении сообщение-напоминание удаляем ---
+async def _delete_message_safe(bot, chat_id: int, message_id: int) -> None:
+    """Тихо удаляет сообщение (напр. напоминание), не падая на «уже удалено»."""
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+    _PANELS.pop(chat_id, None)
+
+
+@router.callback_query(F.data.startswith("rtdone:"))
+async def reminder_task_done(callback: CallbackQuery, state: FSMContext) -> None:
+    """✅ Выполнено из напоминания: отметить и удалить сообщение-напоминание."""
+    await state.clear()
+    tid = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        await task_service.mark_done(session, tid)
+        await session.commit()
+    await callback.answer("✅ Задача выполнена")
+    await _delete_message_safe(callback.message.bot, callback.message.chat.id, callback.message.message_id)
+
+
+@router.callback_query(F.data.startswith("rtcat:"))
+async def reminder_task_category(callback: CallbackQuery, state: FSMContext) -> None:
+    """🏷 Категория из напоминания: запоминаем сообщение, чтобы удалить его после смены."""
+    await state.clear()
+    tid = int(callback.data.split(":", 1)[1])
+    title = await _task_title(tid)
+    await state.update_data(
+        edit_id=tid, new_title=None,
+        remind_chat=callback.message.chat.id, remind_msg=callback.message.message_id,
+    )
+    await state.set_state(TaskFSM.edit_priority)
+    await edit_or_send(
+        callback.message,
+        f"Задача: «{title}»\nНовая категория (приоритет/срок):",
+        reply_markup=_priority_kb("edit", with_date=True),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("rtdate:"))
+async def reminder_task_date(callback: CallbackQuery, state: FSMContext) -> None:
+    """📅 Дата из напоминания: запоминаем сообщение, чтобы удалить его после переноса."""
+    await state.clear()
+    tid = int(callback.data.split(":", 1)[1])
+    title = await _task_title(tid)
+    await state.update_data(
+        edit_id=tid, new_title=None,
+        remind_chat=callback.message.chat.id, remind_msg=callback.message.message_id,
+    )
+    await state.set_state(TaskFSM.edit_date)
+    await edit_or_send(
+        callback.message,
+        f"Задача: «{title}»\nНовая дата в формате ДД.ММ.ГГГГ:",
+        reply_markup=cancel_kb(),
+    )
+    await callback.answer()
+
+
+# Смена категории из карточки задачи
 @router.callback_query(F.data.startswith("taskcat:"))
 async def task_reassign_category(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -922,7 +977,7 @@ async def task_reassign_category(callback: CallbackQuery, state: FSMContext) -> 
     await callback.answer()
 
 
-# Перенос на дату из напоминания
+# Перенос на дату из карточки задачи
 @router.callback_query(F.data.startswith("taskdate:"))
 async def task_reassign_date(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
@@ -958,7 +1013,13 @@ async def task_edit_date(message: Message, state: FSMContext) -> None:
         await task_service.set_due_date(session, data["edit_id"], due)
         await session.commit()
     await state.clear()
-    await wiz_reply(message, f"✅ Задача перенесена на {due.strftime('%d.%m.%Y')}.", reply_markup=main_menu_kb())
+    done_text = f"✅ Задача перенесена на {due.strftime('%d.%m.%Y')}."
+    if data.get("remind_msg"):
+        # Из напоминания: убираем сообщение-напоминание и шлём краткое подтверждение.
+        await _delete_message_safe(message.bot, data["remind_chat"], data["remind_msg"])
+        await message.answer(done_text, reply_markup=main_menu_kb())
+    else:
+        await wiz_reply(message, done_text, reply_markup=main_menu_kb())
 
 
 @router.callback_query(TaskFSM.edit_priority, F.data.startswith("tp:edit:"))
@@ -972,7 +1033,12 @@ async def task_edit_priority(callback: CallbackQuery, state: FSMContext) -> None
         )
         await session.commit()
     await state.clear()
-    await edit_or_send(callback.message, "✅ Задача изменена.", reply_markup=main_menu_kb())
+    if data.get("remind_msg"):
+        # Из напоминания: удаляем сообщение-напоминание, шлём краткое подтверждение.
+        await _delete_message_safe(callback.message.bot, callback.message.chat.id, callback.message.message_id)
+        await callback.message.answer("✅ Категория задачи изменена.", reply_markup=main_menu_kb())
+    else:
+        await edit_or_send(callback.message, "✅ Задача изменена.", reply_markup=main_menu_kb())
     await callback.answer()
 
 
@@ -1054,9 +1120,11 @@ async def _open_task_card(message: Message, task_id: int) -> None:
         await wiz_reply(message, "Задача не найдена.", reply_markup=main_menu_kb())
         return
     due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
+    icon = task_service.due_color_icon(t.due_date)
     text = (
-        f"<b>Задача</b>\n{task_service.PRIORITY_LABEL.get(t.priority, '')} {t.title}\n"
-        f"Адресат: {_assignee_label(t.assignee)}\nСрок: {due} · статус: {t.status.value}"
+        f"<b>Задача</b>\n{icon} {t.title}\n"
+        f"Категория: {task_service.PRIORITY_TEXT.get(t.priority, '')}\n"
+        f"Адресат: {_assignee_label(t.assignee)}\nСрок: {due} ({_due_human(t.due_date)}) · статус: {t.status.value}"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"taskdone:{t.id}"),

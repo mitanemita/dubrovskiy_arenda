@@ -33,6 +33,34 @@ PRIORITY_LABEL = {
     TaskPriority.low: "🟢 3 (25 дней)",
 }
 
+# Категория без цвета (цвет теперь отражает остаток дней до срока, а не категорию)
+PRIORITY_TEXT = {
+    TaskPriority.high: "1 (3 дня)",
+    TaskPriority.medium: "2 (7 дней)",
+    TaskPriority.low: "3 (25 дней)",
+}
+
+# Цвет задачи по остатку дней до срока (а НЕ по категории):
+#   просрочена — ⚫, 0–3 дня — 🔴, 3–7 — 🟡, 7–25 — 🟢, 25+ — 🔵.
+DUE_COLOR_LEGEND = "🔴 ≤3 дн · 🟡 ≤7 · 🟢 ≤25 · 🔵 >25 · ⚫ просрочена"
+
+
+def due_color_icon(due: date | None, today: date | None = None) -> str:
+    """Кружок-индикатор по количеству дней до срока (см. DUE_COLOR_LEGEND)."""
+    if due is None:
+        return "⚪"
+    today = today or date.today()
+    days = (due - today).days
+    if days < 0:
+        return "⚫"   # просрочена
+    if days <= 3:
+        return "🔴"   # 0–3 дня
+    if days <= 7:
+        return "🟡"   # 3–7 дней
+    if days <= 25:
+        return "🟢"   # 7–25 дней
+    return "🔵"       # 25+ дней
+
 
 def due_from_priority(priority: TaskPriority, created: date) -> date:
     """Срок задачи = дата создания + длительность по приоритету."""

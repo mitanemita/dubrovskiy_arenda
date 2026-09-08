@@ -1,8 +1,14 @@
-"""Отправка писем: SMTP или HTTPS email-API (Brevo/SendGrid/Resend).
+"""Отправка писем: SMTP, HTTPS email-API (Brevo/SendGrid/Resend), Gmail API или n8n.
 
 Многие хостеры блокируют исходящий SMTP (порты 25/465/587). Тогда в .env задаётся
-EMAIL_PROVIDER=brevo|sendgrid|resend + EMAIL_API_KEY + EMAIL_FROM, и письма уходят
-по HTTPS (443), который обычно открыт. По умолчанию EMAIL_PROVIDER=smtp.
+другой транспорт (EMAIL_PROVIDER), работающий по HTTPS/HTTP:
+  smtp (по умолчанию) | n8n | gmail | brevo | sendgrid | resend
+
+n8n-транспорт: бот POST-ит письмо (адресат, тема, текст, вложения-PDF и метаданные
+документа) в вебхук n8n, а n8n собирает и отправляет письмо своей нодой (Gmail,
+SMTP-relay и т.п.). Так вся отправка документов (УПД по аренде/электричеству и
+квитанции) идёт единообразно через n8n на том же сервере. Формат payload — см.
+docs/n8n_email.md и app/email/n8n_send_email.workflow.json.
 
 SMTP-транспорт принудительно использует IPv4 (у многих серверов нет IPv6-маршрута,
 из-за чего smtp.gmail.com даёт «Network is unreachable»).
@@ -12,12 +18,52 @@ from __future__ import annotations
 import asyncio
 import base64
 import socket
+from dataclasses import dataclass, field
 from email.message import EmailMessage
 
 import aiohttp
 import aiosmtplib
 
 from app.config import get_settings
+
+
+# --- Нормализованное письмо ------------------------------------------------
+@dataclass
+class OutgoingEmail:
+    """Единая модель письма для всех транспортов.
+
+    attachments — список (имя файла, содержимое-байты). meta — произвольные
+    метаданные документа (тип, арендатор, договор, период, сумма), которые
+    транспорт n8n прокидывает в вебхук для гибкой сборки письма.
+    """
+
+    to: str
+    subject: str
+    body: str
+    attachments: list[tuple[str, bytes]] = field(default_factory=list)
+    meta: dict | None = None
+
+    def as_email_message(self, sender: str) -> EmailMessage:
+        """Собирает MIME-сообщение (для SMTP и Gmail API)."""
+        msg = EmailMessage()
+        msg["From"] = sender
+        msg["To"] = self.to
+        msg["Subject"] = self.subject
+        msg.set_content(self.body)
+        for filename, content in self.attachments:
+            msg.add_attachment(content, maintype="application", subtype="pdf", filename=filename)
+        return msg
+
+    def attachments_b64(self) -> list[dict]:
+        """Вложения в виде списка словарей с base64 (для JSON-транспортов)."""
+        return [
+            {
+                "filename": filename,
+                "mime_type": "application/pdf",
+                "content_base64": base64.b64encode(content).decode(),
+            }
+            for filename, content in self.attachments
+        ]
 
 
 # --- SMTP (IPv4) -----------------------------------------------------------
@@ -35,7 +81,8 @@ def _connect_ipv4_sock(host: str, port: int, timeout: float) -> socket.socket:
     raise last_err or OSError(f"Не удалось подключиться к {host}:{port} по IPv4")
 
 
-async def _send_smtp(settings, msg: EmailMessage, timeout: float) -> None:
+async def _send_smtp(settings, email: OutgoingEmail, timeout: float) -> None:
+    msg = email.as_email_message(settings.sender_email)
     sock = await asyncio.to_thread(_connect_ipv4_sock, settings.smtp_server, settings.smtp_port, timeout)
     await aiosmtplib.send(
         msg,
@@ -60,15 +107,16 @@ async def _post_json(url: str, headers: dict, payload: dict, timeout: float, ok_
                 raise RuntimeError(f"{url} → HTTP {resp.status}: {text}")
 
 
-async def _send_brevo(settings, to, subject, body, attachment, filename, timeout) -> None:
+async def _send_brevo(settings, email: OutgoingEmail, timeout: float) -> None:
     payload = {
         "sender": {"email": settings.sender_email},
-        "to": [{"email": to}],
-        "subject": subject,
-        "textContent": body,
+        "to": [{"email": email.to}],
+        "subject": email.subject,
+        "textContent": email.body,
     }
-    if attachment is not None:
-        payload["attachment"] = [{"content": base64.b64encode(attachment).decode(), "name": filename}]
+    atts = email.attachments_b64()
+    if atts:
+        payload["attachment"] = [{"content": a["content_base64"], "name": a["filename"]} for a in atts]
     await _post_json(
         "https://api.brevo.com/v3/smtp/email",
         {"api-key": settings.email_api_key, "accept": "application/json", "content-type": "application/json"},
@@ -76,18 +124,19 @@ async def _send_brevo(settings, to, subject, body, attachment, filename, timeout
     )
 
 
-async def _send_sendgrid(settings, to, subject, body, attachment, filename, timeout) -> None:
+async def _send_sendgrid(settings, email: OutgoingEmail, timeout: float) -> None:
     payload = {
-        "personalizations": [{"to": [{"email": to}]}],
+        "personalizations": [{"to": [{"email": email.to}]}],
         "from": {"email": settings.sender_email},
-        "subject": subject,
-        "content": [{"type": "text/plain", "value": body}],
+        "subject": email.subject,
+        "content": [{"type": "text/plain", "value": email.body}],
     }
-    if attachment is not None:
+    atts = email.attachments_b64()
+    if atts:
         payload["attachments"] = [{
-            "content": base64.b64encode(attachment).decode(),
-            "filename": filename, "type": "application/pdf", "disposition": "attachment",
-        }]
+            "content": a["content_base64"], "filename": a["filename"],
+            "type": "application/pdf", "disposition": "attachment",
+        } for a in atts]
     await _post_json(
         "https://api.sendgrid.com/v3/mail/send",
         {"authorization": f"Bearer {settings.email_api_key}", "content-type": "application/json"},
@@ -95,10 +144,11 @@ async def _send_sendgrid(settings, to, subject, body, attachment, filename, time
     )
 
 
-async def _send_resend(settings, to, subject, body, attachment, filename, timeout) -> None:
-    payload = {"from": settings.sender_email, "to": [to], "subject": subject, "text": body}
-    if attachment is not None:
-        payload["attachments"] = [{"filename": filename, "content": base64.b64encode(attachment).decode()}]
+async def _send_resend(settings, email: OutgoingEmail, timeout: float) -> None:
+    payload = {"from": settings.sender_email, "to": [email.to], "subject": email.subject, "text": email.body}
+    atts = email.attachments_b64()
+    if atts:
+        payload["attachments"] = [{"filename": a["filename"], "content": a["content_base64"]} for a in atts]
     await _post_json(
         "https://api.resend.com/emails",
         {"authorization": f"Bearer {settings.email_api_key}", "content-type": "application/json"},
@@ -106,18 +156,32 @@ async def _send_resend(settings, to, subject, body, attachment, filename, timeou
     )
 
 
-async def _send_n8n(settings, to, subject, body, attachment, filename, timeout) -> None:
-    """Отправка через вебхук n8n: n8n сам шлёт письмо (напр. Gmail-нодой по 443)."""
+async def _send_n8n(settings, email: OutgoingEmail, timeout: float) -> None:
+    """Отправка через вебхук n8n: n8n сам шлёт письмо (напр. Gmail-нодой по 443).
+
+    Payload самодостаточен: n8n получает адресата, тему, текст, отправителя,
+    метаданные документа и все вложения (base64). Для простых воркфлоу продублированы
+    поля первого вложения (filename/pdf_base64). Если задан WEBHOOK_TOKEN — уходит
+    в заголовке X-Webhook-Token, чтобы вебхук мог проверить источник.
+    """
     if not settings.email_n8n_url:
         raise RuntimeError("EMAIL_N8N_URL не задан")
+    atts = email.attachments_b64()
     payload = {
-        "to": to, "subject": subject, "text": body,
+        "to": email.to,
+        "subject": email.subject,
+        "text": email.body,
         "from": settings.sender_email or None,
-        "filename": filename if attachment is not None else None,
-        "pdf_base64": base64.b64encode(attachment).decode() if attachment is not None else None,
+        "meta": email.meta or {},
+        "attachments": atts,
+        # legacy-поля первого вложения — для простых воркфлоу «одно письмо, один PDF»
+        "filename": atts[0]["filename"] if atts else None,
+        "pdf_base64": atts[0]["content_base64"] if atts else None,
     }
-    await _post_json(settings.email_n8n_url, {"content-type": "application/json"},
-                     payload, timeout, ok_statuses=(200, 201, 202, 204))
+    headers = {"content-type": "application/json"}
+    if settings.webhook_token:
+        headers["X-Webhook-Token"] = settings.webhook_token
+    await _post_json(settings.email_n8n_url, headers, payload, timeout, ok_statuses=(200, 201, 202, 204))
 
 
 async def _gmail_access_token(settings, timeout: float) -> str:
@@ -137,16 +201,10 @@ async def _gmail_access_token(settings, timeout: float) -> str:
             return body["access_token"]
 
 
-async def _send_gmail(settings, to, subject, body, attachment, filename, timeout) -> None:
+async def _send_gmail(settings, email: OutgoingEmail, timeout: float) -> None:
     """Отправка через Gmail API (HTTPS 443, OAuth2 refresh token)."""
     token = await _gmail_access_token(settings, timeout)
-    msg = EmailMessage()
-    msg["From"] = settings.sender_email
-    msg["To"] = to
-    msg["Subject"] = subject
-    msg.set_content(body)
-    if attachment is not None:
-        msg.add_attachment(attachment, maintype="application", subtype="pdf", filename=filename)
+    msg = email.as_email_message(settings.sender_email)
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     await _post_json(
         "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
@@ -162,28 +220,43 @@ _API_SENDERS = {
 
 
 # --- Публичный интерфейс ---------------------------------------------------
+def _normalize_attachments(
+    attachment: bytes | None, filename: str, attachments: list[tuple[str, bytes]] | None
+) -> list[tuple[str, bytes]]:
+    """Сводит одиночное вложение и список к единому списку (имя, байты)."""
+    if attachments:
+        return list(attachments)
+    if attachment is not None:
+        return [(filename, attachment)]
+    return []
+
+
 async def send_email(
     to: str,
     subject: str,
     body: str,
     attachment: bytes | None = None,
     filename: str = "document.pdf",
+    attachments: list[tuple[str, bytes]] | None = None,
+    meta: dict | None = None,
     timeout: float = 20.0,
 ) -> None:
-    """Отправляет письмо выбранным транспортом (EMAIL_PROVIDER)."""
+    """Отправляет письмо выбранным транспортом (EMAIL_PROVIDER).
+
+    Совместимо со старым вызовом (attachment + filename). Для нескольких PDF —
+    передайте attachments=[(имя, байты), ...]. meta прокидывается в n8n-вебхук.
+    """
     settings = get_settings()
+    email = OutgoingEmail(
+        to=to, subject=subject, body=body,
+        attachments=_normalize_attachments(attachment, filename, attachments),
+        meta=meta,
+    )
     provider = (settings.email_provider or "smtp").lower()
     if provider in _API_SENDERS:
-        await _API_SENDERS[provider](settings, to, subject, body, attachment, filename, timeout)
+        await _API_SENDERS[provider](settings, email, timeout)
         return
-    msg = EmailMessage()
-    msg["From"] = settings.sender_email
-    msg["To"] = to
-    msg["Subject"] = subject
-    msg.set_content(body)
-    if attachment is not None:
-        msg.add_attachment(attachment, maintype="application", subtype="pdf", filename=filename)
-    await _send_smtp(settings, msg, timeout)
+    await _send_smtp(settings, email, timeout)
 
 
 async def email_check(timeout: float = 15.0) -> str:

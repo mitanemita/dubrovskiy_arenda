@@ -95,4 +95,5 @@ async def test_task_reminder_has_action_buttons(session, env):
 
     assert notif.status == NotifStatus.sent
     cbs = [btn.callback_data for row in fake.calls[0]["markup"].inline_keyboard for btn in row]
-    assert "taskdone:42" in cbs and "taskcat:42" in cbs and "taskdate:42" in cbs
+    # Кнопки напоминания — отдельный префикс rt… (после действия сообщение удаляется).
+    assert "rtdone:42" in cbs and "rtcat:42" in cbs and "rtdate:42" in cbs

@@ -164,6 +164,40 @@ async def test_set_due_date_resets_reminders(session, landlord):
     assert t.remind_pre_sent is False and t.remind_due_sent is False
 
 
+def test_due_color_icon_by_days_left():
+    today = date(2026, 9, 8)
+    # просрочена — чёрный
+    assert task_service.due_color_icon(date(2026, 9, 7), today) == "⚫"
+    # 0–3 дня — красный (граница 3 включительно)
+    assert task_service.due_color_icon(today, today) == "🔴"
+    assert task_service.due_color_icon(date(2026, 9, 11), today) == "🔴"
+    # 3–7 дней — жёлтый (4..7)
+    assert task_service.due_color_icon(date(2026, 9, 12), today) == "🟡"
+    assert task_service.due_color_icon(date(2026, 9, 15), today) == "🟡"
+    # 7–25 дней — зелёный (8..25)
+    assert task_service.due_color_icon(date(2026, 9, 16), today) == "🟢"
+    assert task_service.due_color_icon(date(2026, 10, 3), today) == "🟢"
+    # 25+ дней — синий
+    assert task_service.due_color_icon(date(2026, 10, 4), today) == "🔵"
+    # без срока — белый
+    assert task_service.due_color_icon(None, today) == "⚪"
+
+
+async def test_reminder_subject_uses_day_color_not_category(session, landlord):
+    # Срок сегодня → 0 дней → красный кружок; в теме нет «(🟡 2 (7 дней))».
+    await task_service.create_task(session, landlord_id=landlord.id, title="Позвонить электрику",
+                                   priority=TaskPriority.medium, today=date(2026, 4, 1))
+    await session.flush()
+    await jobs.generate_task_reminders(session, date(2026, 4, 8))  # день срока (medium=7 дней)
+    await session.flush()
+    notif = (await session.execute(
+        select(Notification).where(Notification.type == "task_reminder"))).scalars().first()
+    assert notif is not None
+    assert notif.subject == "Сегодня срок задачи 🔴"
+    assert "2 (7 дней)" not in notif.subject
+    assert notif.body.startswith("🔴 Позвонить электрику")
+
+
 async def test_reminder_carries_task_id(session, landlord):
     await task_service.create_task(session, landlord_id=landlord.id, title="С кнопками",
                                    priority=TaskPriority.high, today=date(2026, 4, 1))

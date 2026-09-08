@@ -245,7 +245,19 @@ async def upd_email_package(session: AsyncSession, lease_id: int, period: date, 
         f"С уважением,\n{landlord.name}"
     )
     filename = f"{number.replace('/', '-')}.pdf"
-    return {"to": tenant.email, "subject": subject, "body": body, "pdf": pdf, "filename": filename}
+    meta = {
+        "document_type": "upd",
+        "kind": kind.value,  # rent | electricity
+        "number": number,
+        "tenant_name": tenant.name,
+        "tenant_email": tenant.email,
+        "contract_no": lease.contract_no,
+        "period": period.strftime("%Y-%m"),
+        "period_human": ctx.period_ru(period),
+        "amount": str(context["total"]),
+        "landlord_name": landlord.name,
+    }
+    return {"to": tenant.email, "subject": subject, "body": body, "pdf": pdf, "filename": filename, "meta": meta}
 
 
 async def receipt_email_package(session: AsyncSession, lease_id: int, period: date, today: date | None = None) -> dict:
@@ -268,4 +280,16 @@ async def receipt_email_package(session: AsyncSession, lease_id: int, period: da
         f"С уважением,\n{landlord.name}"
     )
     filename = f"Квитанция_{lease.contract_no.replace('/', '-')}_{period.strftime('%Y-%m')}.pdf"
-    return {"to": tenant.email, "subject": subject, "body": body, "pdf": pdf, "filename": filename}
+    meta = {
+        "document_type": "receipt",
+        "tenant_name": tenant.name,
+        "tenant_email": tenant.email,
+        "contract_no": lease.contract_no,
+        "period": period.strftime("%Y-%m"),
+        "period_human": ctx.period_ru(period),
+        "amount": str(context["total"]),
+        "due_date": context["due_str"],
+        "overdue": bool(context.get("overdue")),
+        "landlord_name": landlord.name,
+    }
+    return {"to": tenant.email, "subject": subject, "body": body, "pdf": pdf, "filename": filename, "meta": meta}

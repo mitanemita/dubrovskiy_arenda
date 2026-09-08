@@ -1,0 +1,78 @@
+{
+  "name": "Аренда — отправка писем (send-email)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "send-email",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-send-email",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300],
+      "webhookId": "send-email"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Разбираем payload бота и готовим вложения как бинарные свойства.\n// Бот шлёт: { to, subject, text, from, meta, attachments:[{filename, mime_type, content_base64}] }\nconst b = ($json.body !== undefined) ? $json.body : $json;\n\n// (необязательно) проверка общего секрета: включите WEBHOOK_TOKEN в .env бота\n// и переменную EXPECTED_TOKEN в n8n, затем раскомментируйте:\n// const token = ($node[\"Webhook\"].json.headers || {})[\"x-webhook-token\"];\n// if ($env.EXPECTED_TOKEN && token !== $env.EXPECTED_TOKEN) {\n//   throw new Error(\"Неверный X-Webhook-Token\");\n// }\n\nconst atts = Array.isArray(b.attachments) ? b.attachments : [];\nconst binary = {};\natts.forEach((a, i) => {\n  binary['attachment_' + i] = {\n    data: a.content_base64,\n    mimeType: a.mime_type || 'application/pdf',\n    fileName: a.filename || ('document_' + i + '.pdf'),\n  };\n});\n\nreturn [{\n  json: {\n    to: b.to,\n    from: b.from,\n    subject: b.subject || 'Уведомление',\n    text: b.text || '',\n    meta: b.meta || {},\n    // Список бинарных свойств для узла отправки (через запятую)\n    attachmentProps: Object.keys(binary).join(','),\n  },\n  binary,\n}];"
+      },
+      "id": "prepare-email",
+      "name": "Подготовить письмо",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{$json.from}}",
+        "toEmail": "={{$json.to}}",
+        "subject": "={{$json.subject}}",
+        "emailFormat": "text",
+        "text": "={{$json.text}}",
+        "options": {
+          "attachments": "={{$json.attachmentProps}}"
+        }
+      },
+      "id": "send-smtp",
+      "name": "Отправить письмо (SMTP)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [780, 300],
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_WITH_YOUR_SMTP_CREDENTIAL_ID",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"ok\": true, \"to\": $json.to } }}",
+        "options": {}
+      },
+      "id": "respond-ok",
+      "name": "Ответить боту",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1040, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Подготовить письмо", "type": "main", "index": 0 }]]
+    },
+    "Подготовить письмо": {
+      "main": [[{ "node": "Отправить письмо (SMTP)", "type": "main", "index": 0 }]]
+    },
+    "Отправить письмо (SMTP)": {
+      "main": [[{ "node": "Ответить боту", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "tags": []
+}

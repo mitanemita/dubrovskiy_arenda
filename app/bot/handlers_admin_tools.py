@@ -36,8 +36,9 @@ def _admin_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧪 Заполнить тестовыми данными", callback_data="adm:seed")],
         [InlineKeyboardButton(text="🗑 Очистить все данные", callback_data="adm:wipe_confirm")],
-        [InlineKeyboardButton(text="📧 УПД на почту", callback_data="adm:doc_upd"),
-         InlineKeyboardButton(text="📧 Квитанция на почту", callback_data="adm:doc_receipt")],
+        [InlineKeyboardButton(text="📧 УПД аренда", callback_data="adm:doc_upd"),
+         InlineKeyboardButton(text="📧 УПД электричество", callback_data="adm:doc_upde")],
+        [InlineKeyboardButton(text="📧 Квитанция на почту", callback_data="adm:doc_receipt")],
         [InlineKeyboardButton(text="🔌 Тест почты (без отправки)", callback_data="adm:smtp")],
         [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
     ])
@@ -120,7 +121,7 @@ async def _show_lease_picker(callback: CallbackQuery, kind: str) -> None:
             "Нет активного договора. Сначала «🧪 Заполнить тестовыми данными».", reply_markup=back_kb())
         await callback.answer()
         return
-    doc_name = "УПД" if kind == "upd" else "квитанцию"
+    doc_name = {"upd": "УПД (аренда)", "upde": "УПД (электричество)"}.get(kind, "квитанцию")
     lines = [f"<b>Кому отправить {doc_name}?</b>"]
     kb_rows = []
     for lease_id, contract, name, email in rows:
@@ -136,6 +137,12 @@ async def _show_lease_picker(callback: CallbackQuery, kind: str) -> None:
 async def admin_doc_upd(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await _show_lease_picker(callback, "upd")
+
+
+@router.callback_query(F.data == "adm:doc_upde")
+async def admin_doc_upd_elec(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _show_lease_picker(callback, "upde")
 
 
 @router.callback_query(F.data == "adm:doc_receipt")
@@ -160,6 +167,8 @@ async def admin_send_mail(callback: CallbackQuery, state: FSMContext) -> None:
         try:
             if kind == "upd":
                 pkg = await document_service.upd_email_package(session, lease_id, period, ChargeType.rent)
+            elif kind == "upde":
+                pkg = await document_service.upd_email_package(session, lease_id, period, ChargeType.electricity)
             else:
                 pkg = await document_service.receipt_email_package(session, lease_id, period)
         except Exception as exc:  # noqa: BLE001
@@ -171,7 +180,8 @@ async def admin_send_mail(callback: CallbackQuery, state: FSMContext) -> None:
             "У арендатора не указан email. Укажите его в карточке арендатора.", reply_markup=back_kb())
         return
     try:
-        await send_email(pkg["to"], pkg["subject"], pkg["body"], attachment=pkg["pdf"], filename=pkg["filename"])
+        await send_email(pkg["to"], pkg["subject"], pkg["body"], attachment=pkg["pdf"],
+                         filename=pkg["filename"], meta=pkg.get("meta"))
     except Exception as exc:  # noqa: BLE001 — реальная причина (проверка SMTP)
         logger.exception("Ошибка отправки письма")
         await edit_or_send(
