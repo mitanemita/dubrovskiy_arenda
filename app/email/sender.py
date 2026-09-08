@@ -106,7 +106,59 @@ async def _send_resend(settings, to, subject, body, attachment, filename, timeou
     )
 
 
-_API_SENDERS = {"brevo": _send_brevo, "sendgrid": _send_sendgrid, "resend": _send_resend}
+async def _send_n8n(settings, to, subject, body, attachment, filename, timeout) -> None:
+    """Отправка через вебхук n8n: n8n сам шлёт письмо (напр. Gmail-нодой по 443)."""
+    if not settings.email_n8n_url:
+        raise RuntimeError("EMAIL_N8N_URL не задан")
+    payload = {
+        "to": to, "subject": subject, "text": body,
+        "from": settings.sender_email or None,
+        "filename": filename if attachment is not None else None,
+        "pdf_base64": base64.b64encode(attachment).decode() if attachment is not None else None,
+    }
+    await _post_json(settings.email_n8n_url, {"content-type": "application/json"},
+                     payload, timeout, ok_statuses=(200, 201, 202, 204))
+
+
+async def _gmail_access_token(settings, timeout: float) -> str:
+    """Обновляет access token Gmail по refresh token (OAuth2)."""
+    data = {
+        "client_id": settings.gmail_client_id,
+        "client_secret": settings.gmail_client_secret,
+        "refresh_token": settings.gmail_refresh_token,
+        "grant_type": "refresh_token",
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post("https://oauth2.googleapis.com/token", data=data,
+                                timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            body = await resp.json(content_type=None)
+            if resp.status != 200 or "access_token" not in body:
+                raise RuntimeError(f"Gmail OAuth {resp.status}: {str(body)[:300]}")
+            return body["access_token"]
+
+
+async def _send_gmail(settings, to, subject, body, attachment, filename, timeout) -> None:
+    """Отправка через Gmail API (HTTPS 443, OAuth2 refresh token)."""
+    token = await _gmail_access_token(settings, timeout)
+    msg = EmailMessage()
+    msg["From"] = settings.sender_email
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(body)
+    if attachment is not None:
+        msg.add_attachment(attachment, maintype="application", subtype="pdf", filename=filename)
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    await _post_json(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        {"authorization": f"Bearer {token}", "content-type": "application/json"},
+        {"raw": raw}, timeout, ok_statuses=(200, 201, 202),
+    )
+
+
+_API_SENDERS = {
+    "brevo": _send_brevo, "sendgrid": _send_sendgrid, "resend": _send_resend,
+    "n8n": _send_n8n, "gmail": _send_gmail,
+}
 
 
 # --- Публичный интерфейс ---------------------------------------------------
@@ -138,6 +190,24 @@ async def email_check(timeout: float = 15.0) -> str:
     """Проверяет доступность выбранного транспорта (без отправки письма)."""
     settings = get_settings()
     provider = (settings.email_provider or "smtp").lower()
+
+    if provider == "n8n":
+        if not settings.email_n8n_url:
+            raise RuntimeError("EMAIL_N8N_URL не задан")
+        return f"n8n webhook настроен ({settings.email_n8n_url}); проверьте пробной отправкой"
+
+    if provider == "gmail":
+        token = await _gmail_access_token(settings, timeout)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+                headers={"authorization": f"Bearer {token}"},
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                body = await resp.json(content_type=None)
+                if resp.status != 200:
+                    raise RuntimeError(f"Gmail API HTTP {resp.status}: {str(body)[:300]}")
+                return f"gmail: OAuth OK, ящик {body.get('emailAddress', settings.sender_email)}"
 
     if provider in _API_SENDERS:
         checks = {
