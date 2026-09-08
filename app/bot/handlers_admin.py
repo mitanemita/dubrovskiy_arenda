@@ -1015,9 +1015,10 @@ async def task_edit_date(message: Message, state: FSMContext) -> None:
     await state.clear()
     done_text = f"✅ Задача перенесена на {due.strftime('%d.%m.%Y')}."
     if data.get("remind_msg"):
-        # Из напоминания: убираем сообщение-напоминание и шлём краткое подтверждение.
+        # Из напоминания: убираем сообщение-напоминание; краткое подтверждение БЕЗ меню
+        # (иначе меню оставалось бы в чате и «спамило» его).
         await _delete_message_safe(message.bot, data["remind_chat"], data["remind_msg"])
-        await message.answer(done_text, reply_markup=main_menu_kb())
+        await message.answer(done_text)
     else:
         await wiz_reply(message, done_text, reply_markup=main_menu_kb())
 
@@ -1034,11 +1035,11 @@ async def task_edit_priority(callback: CallbackQuery, state: FSMContext) -> None
         await session.commit()
     await state.clear()
     if data.get("remind_msg"):
-        # Из напоминания: удаляем сообщение-напоминание, шлём краткое подтверждение.
+        # Из напоминания: удаляем сообщение-напоминание, подтверждение — тостом (без меню).
         await _delete_message_safe(callback.message.bot, callback.message.chat.id, callback.message.message_id)
-        await callback.message.answer("✅ Категория задачи изменена.", reply_markup=main_menu_kb())
-    else:
-        await edit_or_send(callback.message, "✅ Задача изменена.", reply_markup=main_menu_kb())
+        await callback.answer("✅ Категория изменена")
+        return
+    await edit_or_send(callback.message, "✅ Задача изменена.", reply_markup=main_menu_kb())
     await callback.answer()
 
 
