@@ -8,7 +8,8 @@ n8n-транспорт: бот POST-ит письмо (адресат, тема,
 документа) в вебхук n8n, а n8n собирает и отправляет письмо своей нодой (Gmail,
 SMTP-relay и т.п.). Так вся отправка документов (УПД по аренде/электричеству и
 квитанции) идёт единообразно через n8n на том же сервере. Формат payload — см.
-docs/n8n_email.md и app/email/n8n_send_email.workflow.json.
+docs/n8n_email.md и app/email/n8n_send_email_smtp.workflow.json
+(вариант по HTTPS/API — app/email/n8n_send_email_brevo.workflow.json).
 
 SMTP-транспорт принудительно использует IPv4 (у многих серверов нет IPv6-маршрута,
 из-за чего smtp.gmail.com даёт «Network is unreachable»).
