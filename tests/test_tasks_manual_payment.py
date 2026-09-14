@@ -134,10 +134,12 @@ async def test_edit_recomputes_due_and_resets_reminders(session, landlord):
     t.remind_due_sent = True
     await session.flush()
 
-    await task_service.update_task(session, t.id, title="Новая", priority=TaskPriority.low)
+    # При смене категории срок считается от СЕГОДНЯ (today), а не от даты создания.
+    await task_service.update_task(session, t.id, title="Новая", priority=TaskPriority.low,
+                                   today=date(2026, 4, 10))
     await session.flush()
     assert t.title == "Новая"
-    assert t.due_date == t.created_at.date() + __import__("datetime").timedelta(days=25)
+    assert t.due_date == date(2026, 4, 10) + __import__("datetime").timedelta(days=25)
     assert t.remind_pre_sent is False and t.remind_due_sent is False
 
 
@@ -230,6 +232,38 @@ async def test_reminders_pre_and_due(session, landlord):
 
     notifs = (await session.execute(select(Notification).where(Notification.type == "task_reminder"))).scalars().all()
     assert len(notifs) == 2 and all(n.channel == NotifChannel.telegram for n in notifs)
+
+
+async def test_task_notifications_inbox_count_and_read(session, landlord):
+    # Напоминание в день срока создаёт «входящее» уведомление.
+    t = await task_service.create_task(session, landlord_id=landlord.id, title="Входящее",
+                                       priority=TaskPriority.high, today=date(2026, 4, 1))
+    await session.flush()
+    await jobs.generate_task_reminders(session, date(2026, 4, 4))
+    await session.flush()
+
+    assert await task_service.count_task_notifications(session, landlord.id) == 1
+    inbox = await task_service.list_task_notifications(session, landlord.id)
+    assert len(inbox) == 1 and inbox[0].related_task_id == t.id
+
+    # Прочтение уменьшает счётчик.
+    await task_service.mark_notification_read(session, inbox[0].id)
+    await session.flush()
+    assert await task_service.count_task_notifications(session, landlord.id) == 0
+
+
+async def test_done_marks_task_notifications_read(session, landlord):
+    t = await task_service.create_task(session, landlord_id=landlord.id, title="Выполнить",
+                                       priority=TaskPriority.high, today=date(2026, 4, 1))
+    await session.flush()
+    await jobs.generate_task_reminders(session, date(2026, 4, 4))
+    await session.flush()
+    assert await task_service.count_task_notifications(session, landlord.id) == 1
+
+    # Выполнение задачи гасит её уведомления.
+    await task_service.mark_task_notifications_read(session, t.id)
+    await session.flush()
+    assert await task_service.count_task_notifications(session, landlord.id) == 0
 
 
 # --- Ручная отметка оплаты ---

@@ -14,14 +14,25 @@ from app.db.enums import NotifChannel, NotifStatus
 from app.db.models import Notification, User
 
 
-async def get_pending(session: AsyncSession, channel: NotifChannel, limit: int = 50) -> list[Notification]:
-    """Уведомления в очереди по каналу (status=queued)."""
-    result = await session.execute(
+async def get_pending(
+    session: AsyncSession,
+    channel: NotifChannel,
+    limit: int = 50,
+    exclude_types: set[str] | None = None,
+) -> list[Notification]:
+    """Уведомления в очереди по каналу (status=queued).
+
+    exclude_types — типы, которые НЕ доставляем (напр. task_reminder: он копится
+    как «входящее» в разделе «Задачи», а не шлётся в чат).
+    """
+    query = (
         select(Notification)
         .where(Notification.channel == channel, Notification.status == NotifStatus.queued)
-        .order_by(Notification.id)
-        .limit(limit)
     )
+    if exclude_types:
+        query = query.where(Notification.type.not_in(exclude_types))
+    query = query.order_by(Notification.id).limit(limit)
+    result = await session.execute(query)
     return list(result.scalars().all())
 
 

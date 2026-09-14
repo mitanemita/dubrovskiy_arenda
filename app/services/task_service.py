@@ -8,11 +8,14 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.enums import TaskPriority, TaskStatus
-from app.db.models import Task
+from app.db.enums import NotifStatus, TaskPriority, TaskStatus
+from app.db.models import Notification, Task
+
+# Тип уведомления по задачам (напоминания копятся как «входящие», не шлём в чат)
+TASK_NOTIF_TYPE = "task_reminder"
 
 # Ведущая нумерация строки: "12." или "12)"
 _LEADING_NUM = re.compile(r"^\s*\d+[.)]\s*")
@@ -222,9 +225,12 @@ async def update_task(
     title: str | None = None,
     priority: TaskPriority | None = None,
     assignee=_UNSET,
+    today: date | None = None,
 ) -> Task | None:
     """Редактирование задачи. При смене приоритета срок и напоминания пересчитываются.
 
+    Срок при смене категории считается от СЕГОДНЯ (today + N дней), а не от даты
+    создания — иначе для старой задачи новый срок оказывался бы в прошлом.
     assignee: строка (кому), None (сделать общей) или _UNSET (не менять).
     """
     task = await session.get(Task, task_id)
@@ -234,7 +240,7 @@ async def update_task(
         task.title = title
     if priority is not None and priority != task.priority:
         task.priority = priority
-        task.due_date = due_from_priority(priority, task.created_at.date())
+        task.due_date = due_from_priority(priority, today or date.today())
         task.remind_pre_sent = False
         task.remind_due_sent = False
     if assignee is not _UNSET:
@@ -263,3 +269,68 @@ async def open_with_due(session: AsyncSession) -> list[Task]:
         select(Task).where(Task.status == TaskStatus.open, Task.due_date.is_not(None))
     )
     return list(result.scalars().all())
+
+
+# --- Входящие уведомления по задачам ---------------------------------------
+# Напоминания больше не шлём в чат: они копятся как «входящие» (queued) и
+# показываются в разделе «Задачи». Прочитанные помечаем status=sent.
+
+
+async def count_task_notifications(session: AsyncSession, landlord_id: int) -> int:
+    """Сколько непрочитанных уведомлений по задачам (для счётчика в меню)."""
+    result = await session.execute(
+        select(func.count()).select_from(Notification).where(
+            Notification.landlord_id == landlord_id,
+            Notification.type == TASK_NOTIF_TYPE,
+            Notification.status == NotifStatus.queued,
+        )
+    )
+    return int(result.scalar_one())
+
+
+async def list_task_notifications(session: AsyncSession, landlord_id: int) -> list[Notification]:
+    """Непрочитанные уведомления по задачам (новые сверху)."""
+    result = await session.execute(
+        select(Notification).where(
+            Notification.landlord_id == landlord_id,
+            Notification.type == TASK_NOTIF_TYPE,
+            Notification.status == NotifStatus.queued,
+        ).order_by(Notification.id.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_notification(session: AsyncSession, notif_id: int) -> Notification | None:
+    return await session.get(Notification, notif_id)
+
+
+async def mark_notification_read(session: AsyncSession, notif_id: int) -> Notification | None:
+    """Помечает одно уведомление прочитанным (status=sent)."""
+    notif = await session.get(Notification, notif_id)
+    if notif is not None and notif.status == NotifStatus.queued:
+        notif.status = NotifStatus.sent
+    return notif
+
+
+async def mark_task_notifications_read(session: AsyncSession, task_id: int) -> int:
+    """Помечает прочитанными все уведомления по задаче (напр. когда её выполнили)."""
+    result = await session.execute(
+        select(Notification).where(
+            Notification.related_task_id == task_id,
+            Notification.type == TASK_NOTIF_TYPE,
+            Notification.status == NotifStatus.queued,
+        )
+    )
+    count = 0
+    for notif in result.scalars().all():
+        notif.status = NotifStatus.sent
+        count += 1
+    return count
+
+
+async def mark_all_task_notifications_read(session: AsyncSession, landlord_id: int) -> int:
+    """Помечает прочитанными все уведомления по задачам арендодателя."""
+    notifs = await list_task_notifications(session, landlord_id)
+    for notif in notifs:
+        notif.status = NotifStatus.sent
+    return len(notifs)

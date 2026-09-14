@@ -204,6 +204,21 @@ async def _landlord_id(session, tg_id: int) -> int | None:
     return await matching_service.get_default_landlord_id(session)
 
 
+def _notif_banner(count: int) -> str:
+    """Жирная плашка со счётчиком уведомлений по задачам (пусто, если их нет).
+
+    Показывается вверху всех меню, КРОМЕ раздела «Задачи» (там своя строка).
+    """
+    return f"<b>🔔 Уведомления по задачам: {count}</b>\n\n" if count else ""
+
+
+async def _tasks_notif_count(tg_id: int) -> int:
+    """Число непрочитанных уведомлений по задачам оператора (для плашки/счётчика)."""
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, tg_id)
+        return await task_service.count_task_notifications(session, lid) if lid else 0
+
+
 def _parse_amount(text: str) -> Decimal | None:
     try:
         return Decimal(text.replace(",", ".").replace(" ", ""))
@@ -222,11 +237,13 @@ def _parse_date(text: str) -> date | None:
 # --- Главное меню ----------------------------------------------------------
 async def show_main_menu(message: Message, *, greet: bool = False, edit: bool = False) -> None:
     """Показывает главное меню (инлайн). greet — приветствие; edit — правит сообщение."""
-    text = (
+    base = (
         "👋 Бот учёта аренды.\nВыберите раздел:"
         if greet
         else "Главное меню — выберите раздел:"
     )
+    # В приватном чате id чата = tg_id пользователя.
+    text = _notif_banner(await _tasks_notif_count(message.chat.id)) + base
     if edit:
         await edit_or_send(message, text, reply_markup=main_menu_kb())
     else:
@@ -256,7 +273,8 @@ async def settings_menu(callback: CallbackQuery, state: FSMContext) -> None:
         for key, title in _EDITABLE_SETTINGS.items()
     ]
     rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")])
-    await edit_or_send(callback.message, "Выберите параметр для изменения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    banner = _notif_banner(await _tasks_notif_count(callback.from_user.id))
+    await edit_or_send(callback.message, banner + "Выберите параметр для изменения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
 
@@ -315,7 +333,8 @@ def _expense_menu_kb() -> InlineKeyboardMarkup:
 @router.callback_query(F.data == "menu:expense")
 async def expense_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await edit_or_send(callback.message, "<b>💸 Расходы</b> — что сделать?", reply_markup=_expense_menu_kb())
+    banner = _notif_banner(await _tasks_notif_count(callback.from_user.id))
+    await edit_or_send(callback.message, banner + "<b>💸 Расходы</b> — что сделать?", reply_markup=_expense_menu_kb())
     await callback.answer()
 
 
@@ -505,7 +524,8 @@ async def readings_menu(callback: CallbackQuery, state: FSMContext) -> None:
         for mid, serial, label, prem in rows
     ]
     kb_rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")])
-    await edit_or_send(callback.message, "Выберите счётчик для ввода показаний:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    banner = _notif_banner(await _tasks_notif_count(callback.from_user.id))
+    await edit_or_send(callback.message, banner + "Выберите счётчик для ввода показаний:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
     await callback.answer()
 
 
@@ -595,13 +615,15 @@ def _priority_kb(context: str, with_keep: bool = False, with_date: bool = False)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _tasks_menu_kb() -> InlineKeyboardMarkup:
-    """Компактное меню раздела «Задачи»."""
+def _tasks_menu_kb(notif_count: int = 0) -> InlineKeyboardMarkup:
+    """Компактное меню раздела «Задачи» (со строкой уведомлений и счётчиком)."""
+    notif_label = f"🔔 Уведомления ({notif_count})" if notif_count else "🔔 Уведомления"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Ближайшие", callback_data="tasks:recent"),
          InlineKeyboardButton(text="✏️ Редактировать", callback_data="tasks:edit")],
         [InlineKeyboardButton(text="➕ Задача", callback_data="task_add"),
          InlineKeyboardButton(text="➕ Списком", callback_data="task_bulk")],
+        [InlineKeyboardButton(text=notif_label, callback_data="tasks:notif")],
         [InlineKeyboardButton(text="✅ Выполненные", callback_data="tasks:done")],
         [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
     ])
@@ -625,11 +647,121 @@ def _task_line(idx: int, t) -> str:
     return f"{idx}. {icon} {t.title} · {_assignee_label(t.assignee)} · до {due} ({_due_human(t.due_date)})"
 
 
+def _task_card_text(t) -> str:
+    """Текст карточки задачи (цвет — по остатку дней, категория — отдельной строкой)."""
+    due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
+    icon = task_service.due_color_icon(t.due_date)
+    return (
+        f"<b>Задача</b>\n{icon} {t.title}\n"
+        f"Категория: {task_service.PRIORITY_TEXT.get(t.priority, '')}\n"
+        f"Адресат: {_assignee_label(t.assignee)}\n"
+        f"Срок: {due} ({_due_human(t.due_date)}) · статус: {t.status.value}"
+    )
+
+
+def _task_card_kb(t, back_cb: str = "tasks:edit") -> InlineKeyboardMarkup:
+    """Клавиатура карточки задачи; back_cb задаёт, куда ведёт «Назад»."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"taskdone:{t.id}"),
+         InlineKeyboardButton(text="🗑 Удалить", callback_data=f"taskdel:{t.id}")],
+        [InlineKeyboardButton(text="🏷 Категория", callback_data=f"taskcat:{t.id}"),
+         InlineKeyboardButton(text="📅 Дата", callback_data=f"taskdate:{t.id}")],
+        [InlineKeyboardButton(text="👤 Адресат", callback_data=f"taskasg:{t.id}")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=back_cb)],
+    ])
+
+
 @router.callback_query(F.data == "menu:tasks")
 async def tasks_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await edit_or_send(callback.message, "<b>📝 Задачи</b> — что открыть?", reply_markup=_tasks_menu_kb())
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        count = await task_service.count_task_notifications(session, lid) if lid else 0
+    header = "<b>📝 Задачи</b> — что открыть?"
+    if count:
+        header = f"<b>🔔 Уведомления по задачам: {count}</b>\n\n" + header
+    await edit_or_send(callback.message, header, reply_markup=_tasks_menu_kb(count))
     await callback.answer()
+
+
+# --- Входящие уведомления по задачам ---------------------------------------
+_NOTIF_PAGE = 20
+
+
+@router.callback_query(F.data == "tasks:notif")
+async def tasks_notifications(callback: CallbackQuery, state: FSMContext) -> None:
+    """Список непрочитанных уведомлений по задачам + кнопки-номера для действий."""
+    await state.clear()
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        notifs = await task_service.list_task_notifications(session, lid) if lid else []
+        # Подтягиваем задачи для отображения (название, срок, цвет).
+        items = []
+        for n in notifs[:_NOTIF_PAGE]:
+            t = await task_service.get_task(session, n.related_task_id) if n.related_task_id else None
+            items.append((n, t))
+
+    lines = ["<b>🔔 Уведомления по задачам</b>"]
+    if not notifs:
+        lines.append("— нет непрочитанных уведомлений")
+    else:
+        lines.append(f"<i>{task_service.DUE_COLOR_LEGEND}</i>")
+        for i, (n, t) in enumerate(items, start=1):
+            if t is not None:
+                icon = task_service.due_color_icon(t.due_date)
+                due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
+                lines.append(f"{i}. {icon} {t.title} · до {due} ({_due_human(t.due_date)})")
+            else:
+                lines.append(f"{i}. {n.subject or 'Уведомление'} · <i>задача удалена</i>")
+        if len(notifs) > _NOTIF_PAGE:
+            lines.append(f"… и ещё {len(notifs) - _NOTIF_PAGE}.")
+
+    num_buttons = [
+        InlineKeyboardButton(text=str(i), callback_data=f"npick:{n.id}")
+        for i, (n, _t) in enumerate(items, start=1)
+    ]
+    rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    if notifs:
+        rows.append([InlineKeyboardButton(text="✅ Прочитать все", callback_data="tasks:notif:readall")])
+    rows.append([InlineKeyboardButton(text="◀️ К задачам", callback_data="menu:tasks")])
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "tasks:notif:readall")
+async def tasks_notifications_read_all(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        n = await task_service.mark_all_task_notifications_read(session, lid) if lid else 0
+        await session.commit()
+    await callback.answer(f"Прочитано: {n}")
+    await tasks_notifications(callback, state)
+
+
+@router.callback_query(F.data.startswith("npick:"))
+async def notification_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    """Открывает уведомление: помечает прочитанным и показывает карточку задачи."""
+    await state.clear()
+    nid = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        notif = await task_service.get_notification(session, nid)
+        if notif is None:
+            await callback.answer("Уведомление не найдено", show_alert=True)
+            return
+        await task_service.mark_notification_read(session, nid)
+        t = await task_service.get_task(session, notif.related_task_id) if notif.related_task_id else None
+        await session.commit()
+    await callback.answer("Прочитано")
+    if t is None:
+        text = (
+            f"<b>🔔 Уведомление</b>\n{notif.subject or ''}\n{notif.body or ''}\n\n"
+            "<i>Задача не найдена (возможно, удалена).</i>"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ К уведомлениям", callback_data="tasks:notif")]])
+        await edit_or_send(callback.message, text, reply_markup=kb)
+        return
+    await edit_or_send(callback.message, _task_card_text(t), reply_markup=_task_card_kb(t, back_cb="tasks:notif"))
 
 
 @router.callback_query(F.data == "tasks:recent")
@@ -710,24 +842,7 @@ async def task_pick(callback: CallbackQuery, state: FSMContext) -> None:
     if t is None:
         await callback.answer("Задача не найдена", show_alert=True)
         return
-    due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
-    icon = task_service.due_color_icon(t.due_date)
-    text = (
-        f"<b>Задача</b>\n"
-        f"{icon} {t.title}\n"
-        f"Категория: {task_service.PRIORITY_TEXT.get(t.priority, '')}\n"
-        f"Адресат: {_assignee_label(t.assignee)}\n"
-        f"Срок: {due} ({_due_human(t.due_date)}) · статус: {t.status.value}"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"taskdone:{t.id}"),
-         InlineKeyboardButton(text="🗑 Удалить", callback_data=f"taskdel:{t.id}")],
-        [InlineKeyboardButton(text="🏷 Категория", callback_data=f"taskcat:{t.id}"),
-         InlineKeyboardButton(text="📅 Дата", callback_data=f"taskdate:{t.id}")],
-        [InlineKeyboardButton(text="👤 Адресат", callback_data=f"taskasg:{t.id}")],
-        [InlineKeyboardButton(text="◀️ К списку", callback_data="tasks:edit")],
-    ])
-    await edit_or_send(callback.message, text, reply_markup=kb)
+    await edit_or_send(callback.message, _task_card_text(t), reply_markup=_task_card_kb(t, back_cb="tasks:edit"))
     await callback.answer()
 
 
@@ -1016,6 +1131,7 @@ async def task_edit_priority(callback: CallbackQuery, state: FSMContext) -> None
 async def task_delete(callback: CallbackQuery) -> None:
     task_id = int(callback.data.split(":", 1)[1])
     async with async_session_factory() as session:
+        await task_service.mark_task_notifications_read(session, task_id)
         await task_service.delete_task(session, task_id)
         await session.commit()
     await callback.answer("Задача удалена")
@@ -1032,6 +1148,7 @@ async def task_done(callback: CallbackQuery) -> None:
     from_reminder = _is_reminder_message(callback.message)
     async with async_session_factory() as session:
         await task_service.mark_done(session, task_id)
+        await task_service.mark_task_notifications_read(session, task_id)
         await session.commit()
     await callback.answer("✅ Задача выполнена")
     if from_reminder:
@@ -1093,22 +1210,7 @@ async def _open_task_card(message: Message, task_id: int) -> None:
     if t is None:
         await wiz_reply(message, "Задача не найдена.", reply_markup=main_menu_kb())
         return
-    due = t.due_date.strftime("%d.%m.%Y") if t.due_date else "—"
-    icon = task_service.due_color_icon(t.due_date)
-    text = (
-        f"<b>Задача</b>\n{icon} {t.title}\n"
-        f"Категория: {task_service.PRIORITY_TEXT.get(t.priority, '')}\n"
-        f"Адресат: {_assignee_label(t.assignee)}\nСрок: {due} ({_due_human(t.due_date)}) · статус: {t.status.value}"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"taskdone:{t.id}"),
-         InlineKeyboardButton(text="🗑 Удалить", callback_data=f"taskdel:{t.id}")],
-        [InlineKeyboardButton(text="🏷 Категория", callback_data=f"taskcat:{t.id}"),
-         InlineKeyboardButton(text="📅 Дата", callback_data=f"taskdate:{t.id}")],
-        [InlineKeyboardButton(text="👤 Адресат", callback_data=f"taskasg:{t.id}")],
-        [InlineKeyboardButton(text="◀️ К списку", callback_data="tasks:edit")],
-    ])
-    await wiz_reply(message, text, reply_markup=kb)
+    await wiz_reply(message, _task_card_text(t), reply_markup=_task_card_kb(t, back_cb="tasks:edit"))
 
 
 # --- Выполненные задачи ----------------------------------------------------
@@ -1160,7 +1262,8 @@ async def payment_manual_menu(callback: CallbackQuery, state: FSMContext) -> Non
         for lease_id, contract, name in rows
     ]
     kb_rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")])
-    await edit_or_send(callback.message, "Выберите договор для отметки оплаты:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    banner = _notif_banner(await _tasks_notif_count(callback.from_user.id))
+    await edit_or_send(callback.message, banner + "Выберите договор для отметки оплаты:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
     await callback.answer()
 
 
@@ -1352,6 +1455,7 @@ async def _show_report_main(callback: CallbackQuery, code: str) -> None:
             await callback.answer()
             return
         s = await report_service.monthly_summary(session, lid, period)
+        notif_count = await task_service.count_task_notifications(session, lid)
     lines = [
         f"<b>📊 Сводка за {_period_ru(period)}</b>",
         f"💰 Доход (оплачено): {s['income']} ₽",
@@ -1359,7 +1463,7 @@ async def _show_report_main(callback: CallbackQuery, code: str) -> None:
         f"⚡ Электричество (начислено): {s['electricity']} ₽",
         f"🔴 Должников: {s['debtors']} из {s['leases']}" + (f" · долг {s['total_debt']} ₽" if s['total_debt'] > 0 else ""),
     ]
-    await edit_or_send(callback.message, "\n".join(lines), reply_markup=_report_nav_kb(code))
+    await edit_or_send(callback.message, _notif_banner(notif_count) + "\n".join(lines), reply_markup=_report_nav_kb(code))
     await callback.answer()
 
 

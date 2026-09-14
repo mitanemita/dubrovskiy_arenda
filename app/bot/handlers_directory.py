@@ -17,7 +17,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from app.bot.handlers_admin import _landlord_id, _parse_amount, _parse_date, edit_or_send, wiz_reply
+from app.bot.handlers_admin import (
+    _landlord_id,
+    _notif_banner,
+    _parse_amount,
+    _parse_date,
+    _tasks_notif_count,
+    edit_or_send,
+    wiz_reply,
+)
 from app.db.base import async_session_factory
 from app.db.enums import OrgType
 from app.db.models import Lease, Premises, Tenant
@@ -103,7 +111,8 @@ class MeterFSM(StatesGroup):
 @router.callback_query(F.data == "menu:directory")
 async def directory_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await edit_or_send(callback.message, "🗂 Справочники — что открыть?", reply_markup=_dir_menu_kb())
+    banner = _notif_banner(await _tasks_notif_count(callback.from_user.id))
+    await edit_or_send(callback.message, banner + "🗂 Справочники — что открыть?", reply_markup=_dir_menu_kb())
     await callback.answer()
 
 
