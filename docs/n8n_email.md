@@ -39,9 +39,10 @@ flowchart LR
 > российского сервера часто НЕ доходит именно до Google (`smtp.gmail.com`), т.к.
 > Google в РФ деградирует, — но **российские почтовые хосты (Яндекс, Mail.ru) по
 > SMTP, как правило, доступны**. Иностранные email-API (Brevo/SendGrid/Resend) в РФ
-> тоже часто недоступны или требуют зарубежный телефон. Поэтому для РФ рекомендуется
-> **Вариант A на Яндекс.Почте/Mail.ru** (SMTP-нода n8n). Какой хост доступен именно у
-> вас — проверьте диагностикой в разделе 3.
+> тоже часто недоступны или требуют зарубежный телефон. Поэтому для РФ: если у хостера
+> открыт SMTP — **Вариант A на Яндекс.Почте/Mail.ru** (SMTP-нода n8n); если SMTP закрыт
+> полностью (частый случай) — **Вариант B через российский ESP UniOne по 443**
+> (раздел 5). Что открыто именно у вас — проверьте диагностикой в разделе 3.
 
 ---
 
@@ -125,10 +126,12 @@ n8n (SMTP-порт отправки 465 и IMAP-порт приёма 993):
 docker compose exec n8n node -e "const net=require('net');[['smtp.yandex.ru',465],['imap.yandex.ru',993],['smtp.mail.ru',465],['imap.mail.ru',993],['smtp.gmail.com',465]].forEach(([h,p])=>{const s=net.connect(p,h);s.setTimeout(6000);s.on('connect',()=>{console.log('OK   ',h+':'+p);s.end()});s.on('timeout',()=>{console.log('TIMEOUT',h+':'+p);s.destroy()});s.on('error',e=>console.log('FAIL ',h+':'+p,e.message))})"
 ```
 
-- `OK smtp.yandex.ru:465` (или mail.ru) → идём **Вариантом A на Яндекс/Mail.ru** —
-  это рекомендуемый путь для РФ.
-- Если доступен только Gmail — используйте его (но в РФ он обычно недоступен).
-- IMAP-строки (`imap.*:993`) нужны для **приёма** писем через n8n (раздел «Приём»).
+- `OK smtp.yandex.ru:465/587` (или mail.ru) → идём **Вариантом A на Яндекс/Mail.ru**.
+- **Все SMTP-порты (465/587/25/2525) в FAIL/TIMEOUT** (частая антиспам-политика
+  хостера) → отправка по SMTP невозможна, идём **Вариантом B (UniOne, раздел 5)** —
+  по HTTPS 443. При необходимости можно попросить хостера открыть исходящий 587.
+- IMAP-строки (`imap.*:993`) нужны для **приёма** писем через n8n (раздел «Приём»)
+  и обычно открыты, даже когда SMTP закрыт.
 
 ---
 
@@ -185,55 +188,54 @@ docker compose exec n8n node -e "const net=require('net');[['smtp.yandex.ru',465
 
 ---
 
-## 5. Вариант B (НЕ для РФ). HTTPS через иностранный email-API
+## 5. Вариант B (для РФ). HTTPS через российский ESP — Unisender Go / UniOne
 
-⚠️ Brevo/SendGrid/Resend и Gmail API в РФ обычно недоступны или требуют зарубежный
-телефон — используйте этот вариант только если сервер вне РФ или есть доступ.
-Готовый воркфлоу для Brevo — `app/email/n8n_send_email_brevo.workflow.json`.
+Когда исходящий SMTP закрыт полностью (все порты 465/587/25/2525 в таймаут), а
+443 открыт, отправляем через **транзакционный HTTP-API UniOne (Unisender Go)** —
+российский сервис, регистрация по российскому номеру, отправка от адреса **на своём
+домене** (с DKIM). Готовый воркфлоу — `app/email/n8n_send_email_unione.workflow.json`.
 
-### 5.1. Получить API-ключ Brevo
+### 5.1. Завести UniOne и подтвердить домен
 
-1. Зарегистрируйтесь на `https://www.brevo.com` и подтвердите почту.
-2. **SMTP & API → API Keys → Generate a new API key** → скопируйте ключ.
-3. Подтвердите отправителя: **Senders** → добавьте и подтвердите адрес, который
-   будете указывать в `EMAIL_FROM` (Brevo шлёт только от подтверждённых адресов).
+1. Зарегистрируйтесь: `https://go.unisender.ru` (Unisender Go / UniOne).
+2. **Settings → Sending domains** (Домены отправки) → добавьте свой домен.
+3. Пропишите в DNS домена показанные записи **DKIM, SPF (и DMARC)** и дождитесь
+   статуса «подтверждён». Адрес отправителя (`EMAIL_FROM`) должен быть на этом
+   домене, например `noreply@ваш-домен.ru`.
+4. **Settings → API keys** → создайте API-ключ, скопируйте.
+
+> Кластер аккаунта виден в панели: РФ-аккаунты — `go1.unisender.ru` (уже прописан
+> в воркфлоу). Если ваш аккаунт на другом кластере (`go2...`/`eu1...`), поменяйте
+> host в URL узла «UniOne API».
 
 ### 5.2. Отдать ключ в n8n
 
-Добавьте ключ в окружение n8n. В `docker-compose.yml`, сервис `n8n`, блок
-`environment`, добавьте строку (или задайте в `.env` и пробросьте):
-
-```yaml
-    environment:
-      # ...остальное...
-      BREVO_API_KEY: ${BREVO_API_KEY}
-```
-
-и в `.env`:
+Ключ уже проброшен в `docker-compose.yml` (сервис `n8n`, переменная
+`UNIONE_API_KEY`). Задайте его в `.env` и перезапустите n8n:
 
 ```dotenv
-BREVO_API_KEY=xkeysib-...ваш-ключ...
+UNIONE_API_KEY=ваш-api-ключ-unione
 ```
-
-Перезапустите n8n, чтобы переменная подхватилась:
 
 ```bash
 docker compose up -d n8n
 ```
 
-### 5.3. Импортировать HTTPS-воркфлоу
+### 5.3. Импортировать воркфлоу
 
 1. **Workflows → Import from File** → выберите
-   `app/email/n8n_send_email_brevo.workflow.json`.
-2. Схема: **Webhook → Brevo API → Ответить боту**. Узел «Brevo API» уже настроен:
-   POST на `https://api.brevo.com/v3/smtp/email`, ключ берётся из `$env.BREVO_API_KEY`,
-   тело письма собирается из входящего JSON (адресат/тема/текст/вложения).
+   `app/email/n8n_send_email_unione.workflow.json`.
+2. Схема: **Webhook → UniOne API → Ответить боту**. Узел «UniOne API» уже настроен:
+   POST на `https://go1.unisender.ru/ru/transactional/api/v1/email/send.json`, ключ —
+   из `$env.UNIONE_API_KEY`, тело письма (адресат/тема/текст/вложения-PDF) собирается
+   из входящего JSON бота; `from_email` берётся из `EMAIL_FROM`.
 
-> Аналогично можно отправлять через **Resend** (`https://api.resend.com/emails`,
-> заголовок `Authorization: Bearer <ключ>`) или узел **Gmail (OAuth2)**. Логика та
-> же — меняется только узел отправки; вход от бота одинаковый.
+Перейдите к разделу 6. В `.env` бота задайте `EMAIL_FROM=noreply@ваш-домен.ru`
+(адрес на подтверждённом домене UniOne).
 
-Перейдите к разделу 6.
+> **Вне РФ** можно так же использовать Brevo (`app/email/n8n_send_email_brevo.workflow.json`,
+> ключ `BREVO_API_KEY`) или Resend/Gmail API — логика та же, меняется только узел
+> отправки; вход от бота одинаковый.
 
 ---
 

@@ -98,9 +98,10 @@ paid_amount, status) + `payments` + `payment_allocations` (разнос плат
 Транспорт `n8n` шлёт самодостаточный JSON: адресат, тема, текст, `from`, `meta`
 (тип документа, арендатор, договор, период, сумма) и `attachments` (PDF в base64),
 плюс legacy-поля `filename`/`pdf_base64` первого вложения. Готовые воркфлоу n8n —
-`app/email/n8n_send_email_smtp.workflow.json` (SMTP) и
-`app/email/n8n_send_email_brevo.workflow.json` (HTTPS/API, когда SMTP заблокирован),
-подробная пошаговая установка на тот же сервер — `docs/n8n_email.md`.
+`n8n_send_email_smtp.workflow.json` (SMTP), `n8n_send_email_unione.workflow.json`
+(UniOne/Unisender Go, РФ, по HTTPS 443 — когда SMTP заблокирован) и
+`n8n_send_email_brevo.workflow.json` (Brevo, вне РФ) в `app/email/`; подробная
+пошаговая установка на тот же сервер (вкл. приём по IMAP) — `docs/n8n_email.md`.
 Через n8n уходят все документы: УПД по аренде и по
 электричеству (`/admin → 📧 УПД аренда | 📧 УПД электричество`) и квитанции
 (`/admin → 📧 Квитанция` и авто-рассылка счёт/напоминание/просрочка).
