@@ -345,6 +345,7 @@ docker compose up -d --build bot
 | Бот: `Cannot connect` / таймаут к n8n | Неверный адрес. Изнутри compose это `http://n8n:5678/...`, а не `localhost`. Проверьте `docker compose ps` — n8n Up. |
 | В Executions **красный SMTP-узел**, `Network unreachable` | Сервер блокирует SMTP — переключитесь на **Вариант B (HTTPS)**. |
 | Письмо ушло, но **без вложения** | В SMTP-узле `Options → Attachments` должно быть `={{$json.attachmentProps}}`; проверьте, что Code-нода отработала (в Executions видны бинарные `attachment_0…`). |
+| Узел падает: **`access to env vars denied`** | n8n по умолчанию блокирует `$env` в выражениях. Задайте `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` в `.env` и `docker compose up -d n8n` (или задайте ключ через **Header Auth credential** вместо `$env`). |
 | Brevo отвечает **401** | Неверный/несозданный `BREVO_API_KEY`, или переменная не проброшена в n8n (перезапустите `n8n`). |
 | Brevo отвечает **400 sender not valid** | Адрес `EMAIL_FROM` не подтверждён в Brevo (**Senders**). |
 | Письмо «отправлено», но не приходит | Проверьте «Спам»; для нового отправителя настройте SPF/DKIM у почтового провайдера. |
