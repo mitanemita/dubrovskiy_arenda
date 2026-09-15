@@ -80,7 +80,8 @@ async def test_dispatch_confirm_request_has_buttons(session, env):
     assert f"pay:{payment.id}:ok" in cbs and f"pay:{payment.id}:no" in cbs
 
 
-async def test_task_reminder_has_action_buttons(session, env):
+async def test_task_reminder_not_pushed_to_chat(session, env):
+    """Напоминания по задачам не шлём в чат — они копятся как «входящие» (queued)."""
     from app.bot import notifier
 
     notif = await notification_service.enqueue(
@@ -93,6 +94,19 @@ async def test_task_reminder_has_action_buttons(session, env):
     await notifier.dispatch_telegram(session, fake)
     await session.flush()
 
-    assert notif.status == NotifStatus.sent
-    cbs = [btn.callback_data for row in fake.calls[0]["markup"].inline_keyboard for btn in row]
-    assert "taskdone:42" in cbs and "taskcat:42" in cbs and "taskdate:42" in cbs
+    assert fake.calls == []                       # в чат ничего не ушло
+    assert notif.status == NotifStatus.queued     # осталось непрочитанным «входящим»
+
+
+def test_is_reminder_message_distinguishes_reminder_from_card():
+    from types import SimpleNamespace
+
+    from app.bot.handlers_admin import _is_reminder_message
+
+    # Напоминания (новый и старый формат темы) — True
+    assert _is_reminder_message(SimpleNamespace(text="Сегодня срок задачи 🔴\nЗадача\nСрок: 08.09.2026"))
+    assert _is_reminder_message(SimpleNamespace(text="Скоро срок задачи 🟡\nЗадача\nСрок: 10.09.2026"))
+    assert _is_reminder_message(SimpleNamespace(text="Сегодня срок задачи (🟡 2 (7 дней))\n…"))
+    # Карточка задачи из меню — False (её нельзя удалять)
+    assert not _is_reminder_message(SimpleNamespace(text="Задача\n🔴 Купить\nКатегория: 1 (3 дня)"))
+    assert not _is_reminder_message(SimpleNamespace(text=None))

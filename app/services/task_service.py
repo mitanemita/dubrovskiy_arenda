@@ -8,11 +8,14 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.enums import TaskPriority, TaskStatus
-from app.db.models import Task
+from app.db.enums import NotifStatus, TaskPriority, TaskStatus
+from app.db.models import Notification, Task
+
+# Тип уведомления по задачам (напоминания копятся как «входящие», не шлём в чат)
+TASK_NOTIF_TYPE = "task_reminder"
 
 # Ведущая нумерация строки: "12." или "12)"
 _LEADING_NUM = re.compile(r"^\s*\d+[.)]\s*")
@@ -33,6 +36,34 @@ PRIORITY_LABEL = {
     TaskPriority.low: "🟢 3 (25 дней)",
 }
 
+# Категория без цвета (цвет теперь отражает остаток дней до срока, а не категорию)
+PRIORITY_TEXT = {
+    TaskPriority.high: "1 (3 дня)",
+    TaskPriority.medium: "2 (7 дней)",
+    TaskPriority.low: "3 (25 дней)",
+}
+
+# Цвет задачи по остатку дней до срока (а НЕ по категории):
+#   просрочена — ⚫, 0–3 дня — 🔴, 3–7 — 🟡, 7–25 — 🟢, 25+ — 🔵.
+DUE_COLOR_LEGEND = "🔴 ≤3 дн · 🟡 ≤7 · 🟢 ≤25 · 🔵 >25 · ⚫ просрочена"
+
+
+def due_color_icon(due: date | None, today: date | None = None) -> str:
+    """Кружок-индикатор по количеству дней до срока (см. DUE_COLOR_LEGEND)."""
+    if due is None:
+        return "⚪"
+    today = today or date.today()
+    days = (due - today).days
+    if days < 0:
+        return "⚫"   # просрочена
+    if days <= 3:
+        return "🔴"   # 0–3 дня
+    if days <= 7:
+        return "🟡"   # 3–7 дней
+    if days <= 25:
+        return "🟢"   # 7–25 дней
+    return "🔵"       # 25+ дней
+
 
 def due_from_priority(priority: TaskPriority, created: date) -> date:
     """Срок задачи = дата создания + длительность по приоритету."""
@@ -48,6 +79,7 @@ async def create_task(
     description: str | None = None,
     created_by_id: int | None = None,
     due_date: date | None = None,
+    assignee: str | None = None,
     today: date | None = None,
 ) -> Task:
     """Создаёт задачу. Срок — из приоритета, либо явный (due_date, «на число»)."""
@@ -59,6 +91,7 @@ async def create_task(
         due_date=due_date or due_from_priority(priority, today),
         description=description,
         created_by_id=created_by_id,
+        assignee=assignee,
     )
     session.add(task)
     return task
@@ -168,8 +201,21 @@ async def list_tasks(session: AsyncSession, landlord_id: int, *, include_done: b
     return tasks
 
 
+async def list_done_tasks(session: AsyncSession, landlord_id: int) -> list[Task]:
+    """Выполненные задачи (хранятся, пока их не удалят вручную)."""
+    result = await session.execute(
+        select(Task).where(Task.landlord_id == landlord_id, Task.status == TaskStatus.done)
+        .order_by(Task.updated_at.desc())
+    )
+    return list(result.scalars().all())
+
+
 async def get_task(session: AsyncSession, task_id: int) -> Task | None:
     return await session.get(Task, task_id)
+
+
+# Значение-«очистка» адресата (задача становится общей)
+_UNSET = object()
 
 
 async def update_task(
@@ -178,8 +224,15 @@ async def update_task(
     *,
     title: str | None = None,
     priority: TaskPriority | None = None,
+    assignee=_UNSET,
+    today: date | None = None,
 ) -> Task | None:
-    """Редактирование задачи. При смене приоритета срок и напоминания пересчитываются."""
+    """Редактирование задачи. При смене приоритета срок и напоминания пересчитываются.
+
+    Срок при смене категории считается от СЕГОДНЯ (today + N дней), а не от даты
+    создания — иначе для старой задачи новый срок оказывался бы в прошлом.
+    assignee: строка (кому), None (сделать общей) или _UNSET (не менять).
+    """
     task = await session.get(Task, task_id)
     if task is None:
         return None
@@ -187,9 +240,11 @@ async def update_task(
         task.title = title
     if priority is not None and priority != task.priority:
         task.priority = priority
-        task.due_date = due_from_priority(priority, task.created_at.date())
+        task.due_date = due_from_priority(priority, today or date.today())
         task.remind_pre_sent = False
         task.remind_due_sent = False
+    if assignee is not _UNSET:
+        task.assignee = assignee
     return task
 
 
@@ -214,3 +269,68 @@ async def open_with_due(session: AsyncSession) -> list[Task]:
         select(Task).where(Task.status == TaskStatus.open, Task.due_date.is_not(None))
     )
     return list(result.scalars().all())
+
+
+# --- Входящие уведомления по задачам ---------------------------------------
+# Напоминания больше не шлём в чат: они копятся как «входящие» (queued) и
+# показываются в разделе «Задачи». Прочитанные помечаем status=sent.
+
+
+async def count_task_notifications(session: AsyncSession, landlord_id: int) -> int:
+    """Сколько непрочитанных уведомлений по задачам (для счётчика в меню)."""
+    result = await session.execute(
+        select(func.count()).select_from(Notification).where(
+            Notification.landlord_id == landlord_id,
+            Notification.type == TASK_NOTIF_TYPE,
+            Notification.status == NotifStatus.queued,
+        )
+    )
+    return int(result.scalar_one())
+
+
+async def list_task_notifications(session: AsyncSession, landlord_id: int) -> list[Notification]:
+    """Непрочитанные уведомления по задачам (новые сверху)."""
+    result = await session.execute(
+        select(Notification).where(
+            Notification.landlord_id == landlord_id,
+            Notification.type == TASK_NOTIF_TYPE,
+            Notification.status == NotifStatus.queued,
+        ).order_by(Notification.id.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_notification(session: AsyncSession, notif_id: int) -> Notification | None:
+    return await session.get(Notification, notif_id)
+
+
+async def mark_notification_read(session: AsyncSession, notif_id: int) -> Notification | None:
+    """Помечает одно уведомление прочитанным (status=sent)."""
+    notif = await session.get(Notification, notif_id)
+    if notif is not None and notif.status == NotifStatus.queued:
+        notif.status = NotifStatus.sent
+    return notif
+
+
+async def mark_task_notifications_read(session: AsyncSession, task_id: int) -> int:
+    """Помечает прочитанными все уведомления по задаче (напр. когда её выполнили)."""
+    result = await session.execute(
+        select(Notification).where(
+            Notification.related_task_id == task_id,
+            Notification.type == TASK_NOTIF_TYPE,
+            Notification.status == NotifStatus.queued,
+        )
+    )
+    count = 0
+    for notif in result.scalars().all():
+        notif.status = NotifStatus.sent
+        count += 1
+    return count
+
+
+async def mark_all_task_notifications_read(session: AsyncSession, landlord_id: int) -> int:
+    """Помечает прочитанными все уведомления по задачам арендодателя."""
+    notifs = await list_task_notifications(session, landlord_id)
+    for notif in notifs:
+        notif.status = NotifStatus.sent
+    return len(notifs)

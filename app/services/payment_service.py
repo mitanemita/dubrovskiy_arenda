@@ -86,6 +86,52 @@ async def confirm_payment(
     }
 
 
+async def pay_charge(
+    session: AsyncSession,
+    charge: Charge,
+    amount: Decimal,
+    *,
+    confirmed_by_id: int | None,
+    today: date,
+) -> dict:
+    """Отмечает оплату КОНКРЕТНОГО начисления (напр. только электричество).
+
+    Создаёт подтверждённый платёж и разносит его на это начисление (излишек
+    сверх остатка начисления не разносится). Возвращает сводку.
+    """
+    from app.domain.allocation import charge_status
+
+    payment = Payment(
+        lease_id=charge.lease_id,
+        amount=amount,
+        period=charge.period,
+        payment_date=today,
+        source=DataSource.manual,
+        status=PaymentStatus.pending,
+    )
+    session.add(payment)
+    await session.flush()
+
+    outstanding = charge.amount - charge.paid_amount
+    allocated = amount if amount < outstanding else outstanding
+    if allocated > 0:
+        session.add(PaymentAllocation(payment_id=payment.id, charge_id=charge.id, amount=allocated))
+        charge.paid_amount = charge.paid_amount + allocated
+        charge.status = charge_status(
+            charge.amount, charge.paid_amount, charge.due_date, today, already_sent=True
+        )
+
+    remaining = charge.amount - charge.paid_amount
+    payment.status = PaymentStatus.confirmed if remaining <= 0 else PaymentStatus.partial
+    payment.confirmed_by_id = confirmed_by_id
+    payment.confirmed_at = datetime.now()
+    return {
+        "allocated": allocated,
+        "remaining": remaining if remaining > 0 else Decimal("0"),
+        "fully_paid": remaining <= 0,
+    }
+
+
 async def reject_payment(session: AsyncSession, payment: Payment, rejected_by_id: int | None) -> None:
     """Отклоняет платёж (деньги не пришли / не подтверждены)."""
     payment.status = PaymentStatus.rejected
