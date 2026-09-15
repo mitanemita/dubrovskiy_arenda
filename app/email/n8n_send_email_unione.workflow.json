@@ -30,7 +30,7 @@
         "sendBody": true,
         "contentType": "json",
         "specifyBody": "json",
-        "jsonBody": "={{ (() => { const b = $json.body || $json; const atts = (b.attachments || []).map(a => ({ type: a.mime_type || 'application/pdf', name: a.filename, content: a.content_base64 })); const message = { recipients: [ { email: b.to } ], subject: b.subject, from_email: b.from, from_name: (b.meta && b.meta.landlord_name) || b.from, body: { plaintext: b.text || '' } }; if (atts.length) message.attachments = atts; return JSON.stringify({ message }); })() }}",
+        "jsonBody": "={{ (() => { const b = $json.body || $json; const atts = (b.attachments || []).map(a => ({ type: a.mime_type || 'application/pdf', name: a.filename, content: a.content_base64 })); const message = { recipients: [ { email: b.to } ], subject: b.subject, from_email: b.from, from_name: (b.meta && b.meta.landlord_name) || b.from, body: { plaintext: b.text || '' }, track_links: 0, track_read: 0, skip_unsubscribe: 1 }; if (atts.length) message.attachments = atts; return JSON.stringify({ message }); })() }}",
         "options": {}
       },
       "id": "unione-send",
