@@ -346,6 +346,7 @@ docker compose up -d --build bot
 | В Executions **красный SMTP-узел**, `Network unreachable` | Сервер блокирует SMTP — переключитесь на **Вариант B (HTTPS)**. |
 | Письмо ушло, но **без вложения** | В SMTP-узле `Options → Attachments` должно быть `={{$json.attachmentProps}}`; проверьте, что Code-нода отработала (в Executions видны бинарные `attachment_0…`). |
 | Узел падает: **`access to env vars denied`** | n8n по умолчанию блокирует `$env` в выражениях. Задайте `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` в `.env` и `docker compose up -d n8n` (или задайте ключ через **Header Auth credential** вместо `$env`). |
+| UniOne **401, code 114 «User with id … not found»** | Ключ не с того продукта или запрос на не тот кластер. Ключ должен быть из **Unisender Go** (go.unisender.ru → Настройки → API), а хост в URL узла — совпадать с кластером аккаунта (`go1.unisender.ru` / `go2.unisender.ru` / `eu1.unione.io`, точный URL показан в панели UniOne). |
 | Brevo отвечает **401** | Неверный/несозданный `BREVO_API_KEY`, или переменная не проброшена в n8n (перезапустите `n8n`). |
 | Brevo отвечает **400 sender not valid** | Адрес `EMAIL_FROM` не подтверждён в Brevo (**Senders**). |
 | Письмо «отправлено», но не приходит | Проверьте «Спам»; для нового отправителя настройте SPF/DKIM у почтового провайдера. |
