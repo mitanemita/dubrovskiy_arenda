@@ -145,12 +145,22 @@ n8n после распознавания письма отправляет HTTP
 
 Формат утверждён приказом ФНС от 19.12.2023 № ЕД-7-26/970@ (ред. № ЕД-7-26/1032@).
 
+## Локальный запуск (Windows / macOS)
+
+Пошагово: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md).
+
+## Карта базы
+
+`app/karta/Karta-krasnodar.html` — интерактивная карта (без JS), `app/karta/karta.py` — правка
+данных литер и пересборка. Цвет литеры всегда вычисляется из данных: есть арендатор → «Арендовано».
+План выдачи карты из БД в боте: [docs/KARTA_BOT_PLAN.md](docs/KARTA_BOT_PLAN.md).
+
 ## Разработка и тесты
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt aiosqlite
-pytest -q          # 82 теста (SQLite in-memory, без внешних сервисов)
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+pytest -q          # 105 тестов (SQLite in-memory, без внешних сервисов)
 ruff check app     # статический анализ
 ```
 
