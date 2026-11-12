@@ -180,7 +180,7 @@ n8n после распознавания письма отправляет HTTP
 ```bash
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-pytest -q          # 105 тестов (SQLite in-memory, без внешних сервисов)
+pytest -q          # 152 теста (SQLite in-memory, без внешних сервисов)
 ruff check app     # статический анализ
 ```
 

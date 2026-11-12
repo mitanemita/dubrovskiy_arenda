@@ -64,7 +64,12 @@ Windows (PowerShell) и macOS (Терминал) одинаково:
 ```bash
 git clone https://github.com/mitanemita/dubrovskiy_arenda.git
 cd dubrovskiy_arenda
+git checkout claude/migration-service-error-1bjg1w
 ```
+> Актуальный бот (инлайн-меню, одно сообщение-панель, справочники) пока живёт в ветке
+> `claude/migration-service-error-1bjg1w`, а не в `main`. Карта и эта инструкция — в ветке
+> `claude/affectionate-hawking-rhkwwa` (она построена поверх рабочей); после слияния
+> берите рабочую ветку.
 
 Создать `.env` из примера:
 - Windows: `copy .env.example .env`
@@ -79,7 +84,8 @@ DB_USER=postgres
 DB_PASSWORD=localpass               # любой пароль для локальной БД
 DB_NAME=arenda
 WEBHOOK_TOKEN=local-secret
-EMAIL_LOGIN=                        # можно пусто — письма просто не уйдут
+EMAIL_PROVIDER=smtp                 # почта локально не нужна — письма просто не уйдут
+EMAIL_LOGIN=
 EMAIL_PASSWORD=
 ```
 
@@ -92,7 +98,8 @@ docker compose up -d --build
 ```
 Первая сборка 3–10 минут. Миграции БД применяются автоматически (сервис `migrate`).
 
-Первичная инициализация (один раз):
+Первичная инициализация (арендодатель, настройки) выполняется автоматически при старте
+бота. Ручной запуск при необходимости:
 ```bash
 docker compose run --rm api python -m app.scripts.bootstrap
 ```
@@ -101,7 +108,8 @@ docker compose run --rm api python -m app.scripts.bootstrap
 - API: http://localhost:8000/health → `{"status":"ok"}`
 - Документация вебхуков: http://localhost:8000/docs
 - n8n: http://localhost:5678 (логин/пароль из `N8N_USER` / `N8N_PASSWORD`)
-- Бот: напишите тестовому боту `/start`, затем `/menu`.
+- Бот: напишите тестовому боту `/menu` — откроется инлайн-меню в одном сообщении.
+- Демо-данные для проб: `/admin` → «🧪 Заполнить тестовыми данными».
 
 Полезное:
 ```bash

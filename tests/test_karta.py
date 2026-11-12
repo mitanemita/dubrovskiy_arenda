@@ -74,3 +74,17 @@ def test_round_trip():
     karta.update(data, "Е6", tenant="Иванов", rent_fact=20000, rate=650)
     karta.update(data, "Е6", tenant="Нет", rate=600, badge="Свободно, готово к сдаче")
     assert karta.apply(HTML, data) == HTML
+
+
+def test_color_rule_table():
+    """Нет арендатора + готово → зелёный; нет арендатора + не готово → оранжевый."""
+    data = karta.load(HTML)
+    cases = [
+        ({"tenant": "Нет", "ready": "Готов"}, "c-free"),
+        ({"tenant": "нет", "ready": "Не готов"}, "c-notready"),
+        ({"tenant": "", "ready": "Нет"}, "c-notready"),
+        ({"tenant": "Петров", "ready": "Не готов"}, "c-busy"),
+    ]
+    for fields, expected in cases:
+        karta.update(data, "Р2", **fields)
+        assert _poly(karta.apply(HTML, data), "Р2") == expected, fields
