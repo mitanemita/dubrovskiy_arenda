@@ -64,6 +64,38 @@ async def update_landlord_field(session: AsyncSession, landlord_id: int, field: 
 
 
 # --- Помещения -------------------------------------------------------------
+LITERA_MAX_LEN = 32
+
+
+def normalize_litera(value: str | None, *, required: bool = False) -> str | None:
+    """Литера помещения: свободный текст (у разных баз свои литеры), без лишних пробелов.
+
+    Со списком литер карты НЕ сверяется. Пустое значение -> None (или ошибка, если required).
+    """
+    litera = " ".join((value or "").split())
+    if not litera:
+        if required:
+            raise ValueError("Укажите литеру помещения.")
+        return None
+    if len(litera) > LITERA_MAX_LEN:
+        raise ValueError(f"Литера слишком длинная (до {LITERA_MAX_LEN} символов).")
+    return litera
+
+
+def premises_title(premises: Premises) -> str:
+    """Подпись помещения для списков и карточек: «лит. К1 · Склад» или просто название."""
+    return f"лит. {premises.litera} · {premises.label}" if premises.litera else premises.label
+
+
+async def set_premises_litera(session: AsyncSession, premises_id: int, litera: str) -> Premises:
+    """Задаёт литеру помещения (обязательна при добавлении арендатора в помещение)."""
+    premises = await session.get(Premises, premises_id)
+    if premises is None:
+        raise ValueError("Помещение не найдено.")
+    premises.litera = normalize_litera(litera, required=True)
+    return premises
+
+
 async def create_premises(
     session: AsyncSession,
     *,
@@ -72,6 +104,7 @@ async def create_premises(
     address: str | None = None,
     area: Decimal | None = None,
     is_occupied: bool = False,
+    litera: str | None = None,
 ) -> Premises:
     label = label.strip()
     if not label:
@@ -79,7 +112,8 @@ async def create_premises(
     if area is not None and area <= 0:
         raise ValueError("Площадь должна быть больше нуля.")
     premises = Premises(
-        landlord_id=landlord_id, label=label, address=address, area=area, is_occupied=is_occupied
+        landlord_id=landlord_id, label=label, address=address, area=area, is_occupied=is_occupied,
+        litera=normalize_litera(litera),
     )
     session.add(premises)
     return premises
@@ -161,7 +195,10 @@ async def create_lease(
     contract_date: date,
     rent_amount: Decimal,
     payment_day: int = 5,
+    litera: str | None = None,
 ) -> Lease:
+    """Создаёт договор. litera — литера помещения, указанная при добавлении арендатора:
+    записывается в помещение (заменяет прежнюю)."""
     contract_no = contract_no.strip()
     if not contract_no:
         raise ValueError("Номер договора не может быть пустым.")
@@ -169,6 +206,7 @@ async def create_lease(
         raise ValueError("Сумма аренды должна быть больше нуля.")
     if not 1 <= payment_day <= 31:
         raise ValueError("День оплаты должен быть в диапазоне 1..31.")
+    litera = normalize_litera(litera)
     lease = Lease(
         tenant_id=tenant_id,
         premises_id=premises_id,
@@ -183,6 +221,8 @@ async def create_lease(
     premises = await session.get(Premises, premises_id)
     if premises is not None:
         premises.is_occupied = True
+        if litera:
+            premises.litera = litera
     return lease
 
 
@@ -300,6 +340,7 @@ TENANT_FIELDS: dict[str, str] = {
     "phone": "Телефон",
 }
 PREMISES_FIELDS: dict[str, str] = {
+    "litera": "Литера",
     "label": "Название/№",
     "address": "Адрес",
     "area": "Площадь, м²",
@@ -334,6 +375,8 @@ async def update_premises_field(session: AsyncSession, premises_id: int, field: 
         if not value:
             raise ValueError("Название не может быть пустым.")
         premises.label = value
+    elif field == "litera":
+        premises.litera = normalize_litera(value)
     elif field == "address":
         premises.address = value or None
     elif field == "area":

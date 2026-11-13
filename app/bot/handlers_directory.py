@@ -68,6 +68,7 @@ def _list_kb(add_cb: str) -> InlineKeyboardMarkup:
 # --- FSM -------------------------------------------------------------------
 class PremisesFSM(StatesGroup):
     label = State()
+    litera = State()
     address = State()
     area = State()
 
@@ -94,6 +95,7 @@ class LandlordFSM(StatesGroup):
 class LeaseFSM(StatesGroup):
     tenant = State()
     premises = State()
+    litera = State()
     contract_no = State()
     contract_date = State()
     rent = State()
@@ -173,7 +175,7 @@ async def premises_list(callback: CallbackQuery, state: FSMContext) -> None:
             who = ""
             if p.is_occupied and occ.get(p.id):
                 who = " · " + ", ".join(occ[p.id])
-            lines.append(f"{idx}. {p.label}{area} · {_status_label(p.is_occupied)}{who}")
+            lines.append(f"{idx}. {directory_service.premises_title(p)}{area} · {_status_label(p.is_occupied)}{who}")
 
     num_buttons = [
         InlineKeyboardButton(text=str(offset + idx), callback_data=f"ppick:{p.id}")
@@ -200,7 +202,11 @@ async def _render_premises_card(message, pid: int) -> bool:
     if p is None:
         return False
     area = f", {p.area} м²" if p.area is not None else ""
-    text = f"<b>Помещение</b>\n{p.label}{area}\nСтатус: {_status_label(p.is_occupied)}"
+    text = (
+        f"<b>Помещение</b>\n{p.label}{area}\n"
+        f"Литера: {p.litera or '— не указана'}\n"
+        f"Статус: {_status_label(p.is_occupied)}"
+    )
     if p.is_occupied and occ.get(p.id):
         text += "\nЗанимает: " + ", ".join(occ[p.id])
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -289,8 +295,39 @@ async def premises_label(message: Message, state: FSMContext) -> None:
         await wiz_reply(message, "❌ Название не может быть пустым. Повторите:", reply_markup=_io_kb())
         return
     await state.update_data(label=message.text.strip())
+    await state.set_state(PremisesFSM.litera)
+    await wiz_reply(message, _LITERA_PROMPT + "\n\nМожно пропустить — литера всё равно будет спрошена при добавлении арендатора.",
+                    reply_markup=_io_kb("dsk:prem_lit"))
+
+
+_LITERA_PROMPT = (
+    "Литера помещения на территории базы (например <code>К1</code>, <code>Д</code>, <code>Е6</code>).\n"
+    "Пишется как есть — у другой базы могут быть свои литеры."
+)
+
+
+async def _premises_ask_address(message: Message, state: FSMContext, *, edit: bool) -> None:
     await state.set_state(PremisesFSM.address)
-    await wiz_reply(message, "Адрес помещения (или пропустите):", reply_markup=_io_kb("dsk:prem_addr"))
+    show = edit_or_send if edit else wiz_reply
+    await show(message, "Адрес помещения (или пропустите):", reply_markup=_io_kb("dsk:prem_addr"))
+
+
+@router.callback_query(PremisesFSM.litera, F.data == "dsk:prem_lit")
+async def premises_skip_litera(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(litera=None)
+    await _premises_ask_address(callback.message, state, edit=True)
+    await callback.answer()
+
+
+@router.message(PremisesFSM.litera)
+async def premises_litera(message: Message, state: FSMContext) -> None:
+    try:
+        litera = directory_service.normalize_litera(message.text, required=True)
+    except ValueError as exc:
+        await wiz_reply(message, f"❌ {exc} Повторите или пропустите:", reply_markup=_io_kb("dsk:prem_lit"))
+        return
+    await state.update_data(litera=litera)
+    await _premises_ask_address(message, state, edit=False)
 
 
 @router.callback_query(PremisesFSM.address, F.data == "dsk:prem_addr")
@@ -331,10 +368,10 @@ async def _premises_finish(message: Message, tg_id: int, state: FSMContext, *, a
         try:
             p = await directory_service.create_premises(
                 session, landlord_id=lid, label=data["label"], address=data.get("address"),
-                area=area, is_occupied=False,
+                area=area, is_occupied=False, litera=data.get("litera"),
             )
             await session.flush()
-            label = p.label
+            label = directory_service.premises_title(p)
             await session.commit()
         except ValueError as exc:
             await session.rollback()
@@ -581,7 +618,7 @@ async def leases_list(callback: CallbackQuery, state: FSMContext) -> None:
         lid = await _landlord_id(session, callback.from_user.id)
         items = await directory_service.list_leases(session, lid) if lid else []
         tmap = {t.id: t.name for t in (await directory_service.list_tenants(session, lid) if lid else [])}
-        pmap = {p.id: p.label for p in (await directory_service.list_premises(session, lid) if lid else [])}
+        pmap = {p.id: directory_service.premises_title(p) for p in (await directory_service.list_premises(session, lid) if lid else [])}
     lines = ["<b>📄 Договоры</b> (нажмите № для карточки):"]
     if not items:
         lines.append("— пусто")
@@ -606,6 +643,7 @@ async def _render_lease_card(message, lease_id: int) -> bool:
         f"<b>Договор №{l.contract_no}</b>\n"
         f"Арендатор: {tenant.name if tenant else '?'}\n"
         f"Помещение: {premises.label if premises else '?'}\n"
+        f"Литера: {(premises.litera if premises else None) or '— не указана'}\n"
         f"Аренда: {l.rent_amount} ₽ · день оплаты: {l.payment_day}\n"
         f"Статус: {l.status.value}"
     )
@@ -653,7 +691,7 @@ async def lease_reassign_menu(callback: CallbackQuery, state: FSMContext) -> Non
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         premises = await directory_service.list_premises(session, lid) if lid else []
-    rows = [[InlineKeyboardButton(text=f"{p.label} · {_status_label(p.is_occupied)}", callback_data=f"lpremok:{lease_id}:{p.id}")]
+    rows = [[InlineKeyboardButton(text=f"{directory_service.premises_title(p)} · {_status_label(p.is_occupied)}", callback_data=f"lpremok:{lease_id}:{p.id}")]
             for p in premises]
     rows.append([InlineKeyboardButton(text="◀️ Отмена", callback_data=f"lpick:{lease_id}")])
     await edit_or_send(callback.message, "Выберите новое помещение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -775,7 +813,7 @@ async def lease_pick_tenant(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
     await state.set_state(LeaseFSM.premises)
-    rows = [[InlineKeyboardButton(text=p.label, callback_data=f"dlp:{p.id}")] for p in premises]
+    rows = [[InlineKeyboardButton(text=directory_service.premises_title(p), callback_data=f"dlp:{p.id}")] for p in premises]
     rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")])
     await edit_or_send(callback.message, "Выберите помещение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
@@ -783,10 +821,60 @@ async def lease_pick_tenant(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(LeaseFSM.premises, F.data.startswith("dlp:"))
 async def lease_pick_premises(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(premises_id=int(callback.data.split(":", 1)[1]))
-    await state.set_state(LeaseFSM.contract_no)
-    await edit_or_send(callback.message, "Номер договора:", reply_markup=_io_kb())
+    """После выбора помещения обязательно спрашиваем литеру (свободный текст)."""
+    pid = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        p = await session.get(Premises, pid)
+    if p is None:
+        await callback.answer("Помещение не найдено", show_alert=True)
+        return
+    await state.update_data(premises_id=pid, premises_litera=p.litera)
+    await state.set_state(LeaseFSM.litera)
+    rows = []
+    if p.litera:
+        rows.append([InlineKeyboardButton(text=f"✅ Оставить литеру {p.litera}", callback_data="dll:keep")])
+    rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")])
+    current = f"Сейчас у помещения литера <b>{p.litera}</b> — оставьте её или введите другую." if p.litera \
+        else "У помещения литера ещё не указана — введите её."
+    await edit_or_send(
+        callback.message,
+        f"Помещение «{p.label}».\n{_LITERA_PROMPT}\n\n{current}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
     await callback.answer()
+
+
+async def _lease_ask_contract_no(message: Message, state: FSMContext, litera: str, *, edit: bool) -> None:
+    await state.update_data(litera=litera)
+    await state.set_state(LeaseFSM.contract_no)
+    show = edit_or_send if edit else wiz_reply
+    await show(message, f"Литера: <b>{litera}</b>.\nНомер договора:", reply_markup=_io_kb())
+
+
+@router.callback_query(LeaseFSM.litera, F.data == "dll:keep")
+async def lease_keep_litera(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    litera = data.get("premises_litera")
+    if not litera:
+        await callback.answer("Введите литеру текстом", show_alert=True)
+        return
+    await _lease_ask_contract_no(callback.message, state, litera, edit=True)
+    await callback.answer()
+
+
+@router.message(LeaseFSM.litera)
+async def lease_litera(message: Message, state: FSMContext) -> None:
+    try:
+        litera = directory_service.normalize_litera(message.text, required=True)
+    except ValueError as exc:
+        data = await state.get_data()
+        rows = []
+        if data.get("premises_litera"):
+            rows.append([InlineKeyboardButton(text=f"✅ Оставить литеру {data['premises_litera']}", callback_data="dll:keep")])
+        rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")])
+        await wiz_reply(message, f"❌ {exc} Повторите:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        return
+    await _lease_ask_contract_no(message, state, litera, edit=False)
 
 
 @router.message(LeaseFSM.contract_no)
@@ -855,6 +943,7 @@ async def _lease_finish(message: Message, tg_id: int, state: FSMContext, *, paym
                 contract_date=_date.fromisoformat(data["contract_date"]),
                 rent_amount=Decimal(data["rent"]),
                 payment_day=payment_day,
+                litera=data.get("litera"),
             )
             await session.flush()
             lease_id = lease.id
@@ -868,7 +957,8 @@ async def _lease_finish(message: Message, tg_id: int, state: FSMContext, *, paym
             return
     await state.clear()
     await wiz_reply(message, 
-        f"✅ Договор №{data['contract_no']} создан (день оплаты {payment_day}). Аренда за текущий месяц начислена.",
+        f"✅ Договор №{data['contract_no']} создан · литера {data.get('litera') or '—'} "
+        f"(день оплаты {payment_day}). Аренда за текущий месяц начислена.",
         reply_markup=_list_kb("dadd:leases"),
     )
 

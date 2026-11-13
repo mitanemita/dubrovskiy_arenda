@@ -288,3 +288,61 @@ async def test_update_landlord_clear_optional(session, landlord):
     await session.flush()
     lord = await directory_service.get_landlord(session, landlord.id)
     assert lord.kpp is None
+
+
+# --- Литера помещения ---
+async def test_premises_litera_saved_and_trimmed(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад", litera="  К1 ")
+    await session.flush()
+    assert p.litera == "К1"
+    assert directory_service.premises_title(p) == "лит. К1 · Склад"
+
+
+async def test_premises_litera_optional_on_create(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад")
+    await session.flush()
+    assert p.litera is None
+    assert directory_service.premises_title(p) == "Склад"
+
+
+@pytest.mark.parametrize("litera", ["Б-17", "Корпус 3", "A2", "Ангар 5/1"])
+async def test_litera_free_text_not_checked_against_map(session, landlord, litera):
+    """Другая база — свои литеры: любой текст принимается как есть."""
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Объект", litera=litera)
+    await session.flush()
+    assert p.litera == litera
+
+
+def test_litera_required_and_length():
+    with pytest.raises(ValueError):
+        directory_service.normalize_litera("   ", required=True)
+    with pytest.raises(ValueError):
+        directory_service.normalize_litera("Х" * 33)
+    assert directory_service.normalize_litera("  Е 6 ") == "Е 6"
+
+
+async def test_lease_sets_premises_litera(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад", litera="Д")
+    t = await directory_service.create_tenant(
+        session, landlord_id=landlord.id, name="ООО Ромашка", type=OrgType.ooo, inn="7100000001"
+    )
+    await session.flush()
+    await directory_service.create_lease(
+        session, tenant_id=t.id, premises_id=p.id, contract_no="1", contract_date=date(2026, 11, 1),
+        rent_amount=Decimal("45000"), litera="Б-17",
+    )
+    await session.flush()
+    assert p.litera == "Б-17" and p.is_occupied
+
+
+async def test_update_premises_litera_field(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад")
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "litera", "Е6")
+    assert p.litera == "Е6"
+    await directory_service.update_premises_field(session, p.id, "litera", "")
+    assert p.litera is None
+    await directory_service.set_premises_litera(session, p.id, "К5")
+    assert p.litera == "К5"
+    with pytest.raises(ValueError):
+        await directory_service.set_premises_litera(session, p.id, " ")

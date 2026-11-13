@@ -112,6 +112,8 @@ class Premises(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     landlord_id: Mapped[int] = mapped_column(ForeignKey("landlords.id", ondelete="CASCADE"), nullable=False)
     label: Mapped[str] = mapped_column(Text, nullable=False)   # название/№
+    # Литера на территории базы (К1, Д, Е6…). Свободный текст: у другой базы — свои литеры.
+    litera: Mapped[str | None] = mapped_column(String(32))
     address: Mapped[str | None] = mapped_column(Text)          # товарный адрес
     area: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))  # м²
     # Занятость объекта, ведётся вручную и не зависит от наличия арендатора/договора.
