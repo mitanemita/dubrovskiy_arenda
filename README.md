@@ -167,7 +167,7 @@ n8n после распознавания письма отправляет HTTP
 
 ## Локальный запуск (Windows / macOS)
 
-Пошагово: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md).
+Пошагово: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md). Шпаргалка команд для Mac: [docs/MAC_COMMANDS.md](docs/MAC_COMMANDS.md).
 
 ## Карта базы
 
