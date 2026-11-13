@@ -20,6 +20,8 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BufferedInputFile,
+    InputMediaDocument,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -31,6 +33,7 @@ from app.bot.keyboards import back_kb, cancel_kb, main_menu_kb
 from app.db.base import async_session_factory
 from app.db.enums import ChargeType, DataSource, ExpenseCategory, LeaseStatus
 from app.db.models import Charge, Lease, Meter, Premises, Tenant, User
+from app.services import karta_service
 from app.services import (
     adjustment_service,
     billing_service,
@@ -87,11 +90,20 @@ async def edit_or_send(message: Message, text: str, reply_markup=None) -> None:
         if "message is not modified" in str(exc):
             _set_panel(message)
             return
-        m = await message.answer(text, reply_markup=reply_markup)
-        _set_panel(m)
     except Exception:
-        m = await message.answer(text, reply_markup=reply_markup)
-        _set_panel(m)
+        pass
+    # Править нельзя (например, панель — файл карты): новое сообщение вместо старого.
+    m = await message.answer(text, reply_markup=reply_markup)
+    _set_panel(m)
+    await _delete_safe(message)
+
+
+async def _delete_safe(message) -> None:
+    """Удаляет сообщение бота, не падая (уже удалено / старше 48 ч)."""
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 
 async def send_panel(message: Message, text: str, reply_markup=None) -> Message:
@@ -121,6 +133,11 @@ async def wiz_reply(message: Message, text: str, reply_markup=None) -> None:
             pass
     m = await message.answer(text, reply_markup=reply_markup)
     _set_panel(m)
+    if pid:  # старую панель (её нельзя было править) убираем — в чате одно сообщение
+        try:
+            await message.bot.delete_message(chat_id, pid)
+        except Exception:
+            pass
 
 
 # Настройки, доступные для правки через бота: ключ -> подпись
@@ -1423,6 +1440,7 @@ def _report_nav_kb(code: str) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="⚡ Электричество", callback_data=f"rep:elec:{code}")],
         [InlineKeyboardButton(text="🔴 Должники", callback_data=f"rep:debt:{code}"),
          InlineKeyboardButton(text="📅 Другой месяц", callback_data="rep:years")],
+        [InlineKeyboardButton(text="🗺 Карта базы", callback_data=f"rep:map:{code}")],
         [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
     ])
 
@@ -1550,3 +1568,62 @@ async def report_pick_month(callback: CallbackQuery, state: FSMContext) -> None:
     rows.append([InlineKeyboardButton(text="◀️ Год", callback_data="rep:years")])
     await edit_or_send(callback.message, f"Выберите месяц {year}:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
+
+
+# --- Отчёты: карта базы (HTML-файл из актуальных данных БД) ---------------
+def _map_kb(code: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"rep:mapre:{code}")],
+        [InlineKeyboardButton(text="◀️ К сводке", callback_data=f"rep:main:{code}"),
+         InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
+    ])
+
+
+async def _build_map(tg_id: int) -> tuple[BufferedInputFile, str] | None:
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, tg_id)
+        if lid is None:
+            return None
+        html, summary = await karta_service.render_html(session, lid)
+    file = BufferedInputFile(html, filename=f"Karta-{summary['now']:%Y-%m-%d}.html")
+    return file, karta_service.caption(summary)
+
+
+@router.callback_query(F.data.startswith("rep:map:"))
+async def report_map(callback: CallbackQuery, state: FSMContext) -> None:
+    """Карта базы: файл становится панелью чата, прежнее сообщение удаляется."""
+    await state.clear()
+    code = callback.data.split(":")[2]
+    await callback.answer("Собираю карту…")
+    await edit_or_send(callback.message, "⏳ Собираю карту базы…")
+    built = await _build_map(callback.from_user.id)
+    if built is None:
+        await edit_or_send(callback.message, "Нет данных.", reply_markup=back_kb())
+        return
+    file, cap = built
+    doc = await callback.message.answer_document(file, caption=cap, reply_markup=_map_kb(code))
+    _set_panel(doc)
+    await _delete_safe(callback.message)
+
+
+@router.callback_query(F.data.startswith("rep:mapre:"))
+async def report_map_refresh(callback: CallbackQuery, state: FSMContext) -> None:
+    """Пересобирает карту и заменяет файл в том же сообщении."""
+    await state.clear()
+    code = callback.data.split(":")[2]
+    built = await _build_map(callback.from_user.id)
+    if built is None:
+        await callback.answer("Нет данных", show_alert=True)
+        return
+    file, cap = built
+    try:
+        await callback.message.edit_media(
+            InputMediaDocument(media=file, caption=cap), reply_markup=_map_kb(code)
+        )
+        _set_panel(callback.message)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            doc = await callback.message.answer_document(file, caption=cap, reply_markup=_map_kb(code))
+            _set_panel(doc)
+            await _delete_safe(callback.message)
+    await callback.answer("Карта обновлена")
