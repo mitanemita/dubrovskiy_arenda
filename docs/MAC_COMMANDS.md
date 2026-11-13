@@ -27,9 +27,23 @@ ls
 
 ## 2. Запуск
 
-Сначала откройте Docker Desktop и дождитесь статуса *Engine running*:
+Бот работает внутри Docker, поэтому **сначала всегда запускается Docker Desktop**, потом бот.
+
+### Одной командой (рекомендуется)
+Запускает Docker, ждёт, пока он будет готов, и запускает бота:
+```bash
+open -a Docker; until docker info >/dev/null 2>&1; do sleep 2; done; docker compose up -d db migrate api bot
+```
+
+### По шагам
+Запустить Docker Desktop:
 ```bash
 open -a Docker
+```
+
+Подождать 20–60 секунд и проверить, что Docker готов (должен вывести номер версии, например `28.x.x`):
+```bash
+docker info --format '{{.ServerVersion}}'
 ```
 
 Запустить бота, API и базу:
@@ -70,11 +84,24 @@ docker compose restart bot
 
 > ❌ Не используйте `docker compose down -v` — эта команда удаляет базу данных.
 
-После остановки Docker Desktop можно закрыть: значок кита в верхней строке → *Quit Docker Desktop*.
+Закрыть Docker Desktop (освобождает память Мака; сначала остановите бота командой выше):
+```bash
+osascript -e 'quit app "Docker"'
+```
+или значок кита в верхней строке → *Quit Docker Desktop*.
+
+После закрытия Docker бот не работает. Для следующего запуска — раздел 2.
+
+### Остановить всё и закрыть Docker одной командой
+```bash
+docker compose down && osascript -e 'quit app "Docker"'
+```
 
 ---
 
 ## 4. Обновление до новой версии
+
+Docker должен быть запущен (раздел 2).
 
 Скачать изменения:
 ```bash
@@ -122,9 +149,31 @@ docker compose logs migrate
 
 ---
 
-## 6. Проблемы со связью с Telegram
+## 6. Частые ошибки
 
-Ошибка в логах `Cannot connect to host api.telegram.org` — проверить связь с Мака:
+### `failed to connect to the docker API … docker.sock` / `Cannot connect to the Docker daemon`
+Docker Desktop не запущен. Запустите и дождитесь готовности:
+```bash
+open -a Docker; until docker info >/dev/null 2>&1; do sleep 2; done; echo "Docker готов"
+```
+Затем снова команду запуска бота.
+
+### `zsh: command not found: docker`
+Docker Desktop не установлен или ещё ни разу не открывался. Установить:
+```bash
+brew install --cask docker-desktop
+```
+Потом `open -a Docker`, принять соглашение, открыть новое окно Терминала.
+
+### Автозапуск Docker при включении Мака
+Docker Desktop → ⚙️ *Settings* → *General* → **Start Docker Desktop when you sign in to your computer**.
+Бот сам при этом не запускается — после включения Мака выполните команду запуска (раздел 2).
+Если бот был запущен, когда Мак выключили, он поднимется сам вместе с Docker
+(у сервисов стоит `restart: unless-stopped`); после `docker compose down` — нет.
+
+### Связь с Telegram
+
+Ошибка в логах бота `Cannot connect to host api.telegram.org` — проверить связь с Мака:
 ```bash
 curl -m 15 -sS -o /dev/null -w "%{http_code} за %{time_total} с\n" https://api.telegram.org
 ```
@@ -195,9 +244,13 @@ docker compose up -d db migrate api bot
 | Что | Команда |
 |---|---|
 | В папку | `cd ~/работа/dubrovskiy_arenda` |
-| Запустить | `docker compose up -d db migrate api bot` |
+| Запустить Docker | `open -a Docker` (подождать, пока кит перестанет мигать) |
+| Docker готов? | `docker info --format '{{.ServerVersion}}'` |
+| Запустить бота | `docker compose up -d db migrate api bot` |
 | Статус | `docker compose ps` |
 | Логи бота | `docker compose logs -f --tail 100 bot` |
 | Обновить | `git pull` → `docker compose up -d --build db migrate api bot` |
 | Перезапустить бота | `docker compose restart bot` |
-| Остановить | `docker compose down` |
+| Остановить бота | `docker compose down` |
+| Закрыть Docker | `osascript -e 'quit app "Docker"'` |
+| Ошибка `docker.sock` | Docker не запущен → `open -a Docker` |
