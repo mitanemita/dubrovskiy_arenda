@@ -16,12 +16,12 @@ from app.db.base import async_session_factory
 from app.db.models import Payment, User
 from app.services import confirmation_service
 from app.utils.logger import logger
+# Версия — в app/version.py (метка UI + коммит/ветка/время сборки).
+# BOT_UI_VERSION реэкспортируется для старых команд проверки.
+from app.version import BOT_UI_VERSION, version_line  # noqa: F401
 
 router = Router()
 
-# Метка версии интерфейса бота. Видна в /start и /version — по ней сразу понятно,
-# запущена ли на сервере новая сборка (инлайн-меню) или старый образ.
-BOT_UI_VERSION = "inline-menu-2026.11.13.2"
 
 
 async def _is_allowed(session, tg_id: int) -> bool:
@@ -44,14 +44,14 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         return
     # Убираем старую reply-клавиатуру (она «залипает» в чате Telegram),
     # затем показываем инлайн-меню.
-    await message.answer(f"👋 Бот учёта аренды. (v: {BOT_UI_VERSION})", reply_markup=ReplyKeyboardRemove())
+    await message.answer(f"👋 Бот учёта аренды.\n<code>{version_line()}</code>", reply_markup=ReplyKeyboardRemove())
     await show_main_menu(message)
 
 
 @router.message(Command("version"))
 async def cmd_version(message: Message) -> None:
     """Показывает версию UI бота — чтобы проверить, что запущена новая сборка."""
-    await message.answer(f"Версия интерфейса: {BOT_UI_VERSION}", reply_markup=ReplyKeyboardRemove())
+    await message.answer(f"Версия: <code>{version_line()}</code>", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(StateFilter(None), F.text.in_(set(MENU_SECTIONS.values())))

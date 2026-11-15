@@ -26,9 +26,9 @@ DISPATCH_INTERVAL = 15
 
 
 def _ui_version() -> str:
-    from app.bot.handlers import BOT_UI_VERSION
+    from app.version import version_line
 
-    return BOT_UI_VERSION
+    return version_line()
 
 
 class FSMCleanupMiddleware(BaseMiddleware):
@@ -122,7 +122,7 @@ async def run() -> None:
             logger.exception("Не удалось уведомить пользователя об ошибке")
 
     dispatch_task = asyncio.create_task(_dispatch_loop(bot))
-    logger.info("Бот запущен (polling), версия UI: %s", _ui_version())
+    logger.info("Бот запущен (polling), версия: %s", _ui_version())
     try:
         # drop_pending_updates — чистим backlog (в т.ч. после сбоя/двойного запуска).
         await dp.start_polling(bot, drop_pending_updates=True)

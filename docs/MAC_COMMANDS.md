@@ -101,32 +101,27 @@ docker compose down && osascript -e 'quit app "Docker"'
 
 ## 4. Обновление до новой версии
 
-Docker должен быть запущен (раздел 2).
-
-Скачать изменения:
+Docker должен быть запущен (раздел 2). Одна команда делает всё: переключает на ветку
+`main`, скачивает последнюю версию с GitHub, пересобирает, применяет миграции базы и
+проверяет, что запущен именно свежий коммит:
 ```bash
-git pull
+./deploy.sh db migrate api bot
+```
+В конце должно быть `✅ Запущена актуальная версия: … main@<коммит> …`.
+
+Проверить версию в Telegram — команда боту:
+```text
+/version
 ```
 
-Пересобрать и перезапустить (новые миграции базы применятся сами):
+Проверить версию из Терминала:
 ```bash
-docker compose up -d --build db migrate api bot
+docker compose exec bot python -c "from app.version import version_line; print(version_line())"
 ```
 
-Проверить версию интерфейса бота:
-```bash
-docker compose exec bot python -c "from app.bot.handlers import BOT_UI_VERSION; print(BOT_UI_VERSION)"
-```
-
-Посмотреть, на какой ветке вы сейчас:
-```bash
-git branch --show-current
-```
-
-Перейти на другую ветку (если попросят), затем снова `git pull` и пересборка:
-```bash
-git checkout claude/affectionate-hawking-rhkwwa
-```
+> Актуальная версия всегда в ветке **`main`**. Вручную переключать ветки не нужно —
+> `deploy.sh` сделает это сам. Если скрипт пишет «есть изменённые файлы» — кто-то правил
+> файлы проекта в папке; отменить эти правки: `git stash`, затем снова `./deploy.sh …`.
 
 ---
 
@@ -249,7 +244,8 @@ docker compose up -d db migrate api bot
 | Запустить бота | `docker compose up -d db migrate api bot` |
 | Статус | `docker compose ps` |
 | Логи бота | `docker compose logs -f --tail 100 bot` |
-| Обновить | `git pull` → `docker compose up -d --build db migrate api bot` |
+| Обновить до актуальной | `./deploy.sh db migrate api bot` |
+| Какая версия запущена | `/version` в боте |
 | Перезапустить бота | `docker compose restart bot` |
 | Остановить бота | `docker compose down` |
 | Закрыть Docker | `osascript -e 'quit app "Docker"'` |

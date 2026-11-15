@@ -64,12 +64,9 @@ Windows (PowerShell) и macOS (Терминал) одинаково:
 ```bash
 git clone https://github.com/mitanemita/dubrovskiy_arenda.git
 cd dubrovskiy_arenda
-git checkout claude/migration-service-error-1bjg1w
 ```
-> Актуальный бот (инлайн-меню, одно сообщение-панель, справочники) пока живёт в ветке
-> `claude/migration-service-error-1bjg1w`, а не в `main`. Карта и эта инструкция — в ветке
-> `claude/affectionate-hawking-rhkwwa` (она построена поверх рабочей); после слияния
-> берите рабочую ветку.
+> Актуальная версия — ветка `main` (она скачивается по умолчанию). Обновлять потом
+> командой `./deploy.sh db migrate api bot` — см. `docs/MAC_COMMANDS.md`.
 
 Создать `.env` из примера:
 - Windows: `copy .env.example .env`

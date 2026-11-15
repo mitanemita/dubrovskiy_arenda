@@ -24,13 +24,16 @@
   затем `python -m pytest -q` (сейчас ~137 тестов зелёные).
 
 ## Ветка и деплой
-- Работаем в ветке `claude/migration-service-error-1bjg1w` (НЕ main).
-- Деплой: `git fetch origin && git checkout <branch> && git pull &&
-  docker compose up -d --build bot`.
-- В `app/bot/handlers.py` есть `BOT_UI_VERSION` — метка версии UI. Видна в
-  `/start` и `/version`. Поднимай её при каждом изменении бота, чтобы на сервере
-  было видно, что приехала новая сборка (`docker compose exec bot python -c
-  "from app.bot.handlers import BOT_UI_VERSION; print(BOT_UI_VERSION)"`).
+- **Актуальная версия — ветка `main`.** Рабочие ветки (`claude/*`) вливаются в `main`
+  через PR; сервер всегда запускает `main`. Старые ветки
+  `claude/migration-service-error-1bjg1w`, `claude/rental-docs-server-migration-btfw5h`
+  полностью влиты в `main` и больше не используются.
+- Деплой (сервер и Mac): `./deploy.sh` — переключает на `main`, `git pull --ff-only`,
+  `docker compose up -d --build` с build-args коммита/ветки/даты и проверяет, что в
+  контейнере бота именно этот коммит. На Mac: `./deploy.sh db migrate api bot`.
+- Версия: `app/version.py` — `BOT_UI_VERSION` (поднимай при каждом изменении бота) +
+  `GIT_COMMIT`/`GIT_BRANCH`/`BUILD_DATE` из образа. Видна в `/start`, `/version` и в логе
+  старта бота: `inline-menu-… · main@abc1234 · собрано 15.11.2026 10:00`.
 
 ## Структура (главное)
 - `app/db/models.py` — ORM-модели (единый источник правды).
@@ -52,7 +55,7 @@
     `admin_service` (демо-данные и очистка БД — задачи НЕ трогает).
 - `app/bot/` — слой Telegram (тонкие обёртки над сервисами):
   - `handlers.py` — /start, /version, оплата-решение, legacy reply-кнопки,
-    `BOT_UI_VERSION`, `_is_allowed`.
+    `_is_allowed` (версия — `app/version.py`).
   - `handlers_admin.py` — меню, настройки, расходы (+правка по месяцам),
     показания, задачи (адресат/выполненные), оплата, отчёты (сводка+подразделы+
     выбор месяца), правка доходов по месяцам. Тут же `edit_or_send`
@@ -76,7 +79,7 @@
 - Занятость помещения — автоматическая (договор → занято; удаление/смена → свободно).
   Ручной пометки статуса нет.
 - При правках сумм — через `adjustment_service.correct_amount` (пишется аудит).
-- Каждое изменение бота — поднимай `BOT_UI_VERSION`.
+- Каждое изменение бота — поднимай `BOT_UI_VERSION` в `app/version.py`.
 
 ## Данные для аналитики (Power BI и т.п.)
 Всё пишется в PostgreSQL, подключайся напрямую. Доходы = `charges`
@@ -148,7 +151,7 @@ paid_amount, status) + `payments` + `payment_allocations` (разнос плат
 
 ## Как продолжать
 - Меняешь логику → правь `app/services/*` и добавляй тесты в `tests/`.
-- Меняешь UX → правь `app/bot/*`, поднимай `BOT_UI_VERSION`, прогоняй
+- Меняешь UX → правь `app/bot/*`, поднимай `BOT_UI_VERSION` (`app/version.py`), прогоняй
   `python -m pytest -q`. Для проверки хендлеров без Telegram можно поднять
   Dispatcher с фейковым Bot (см. историю — переопределение `Bot.__call__`).
 - Схему БД меняешь → новая миграция в `alembic/versions/` (цепочка down_revision)
