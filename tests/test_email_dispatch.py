@@ -13,8 +13,9 @@ class FakeEmail:
     def __init__(self):
         self.sent = []
 
-    async def __call__(self, to, subject, body, attachment=None, filename="document.pdf"):
-        self.sent.append({"to": to, "subject": subject, "attachment": attachment, "filename": filename})
+    async def __call__(self, to, subject, body, attachment=None, filename="document.pdf", meta=None):
+        self.sent.append({"to": to, "subject": subject, "attachment": attachment,
+                          "filename": filename, "meta": meta})
 
 
 async def _fake_receipt(session, lease_id, period):

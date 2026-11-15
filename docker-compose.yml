@@ -1,3 +1,11 @@
+# Сборка с версией: deploy.sh передаёт коммит/ветку/время (видно в /version бота)
+x-build: &app-build
+  context: .
+  args:
+    GIT_COMMIT: ${GIT_COMMIT:-unknown}
+    GIT_BRANCH: ${GIT_BRANCH:-unknown}
+    BUILD_DATE: ${BUILD_DATE:-unknown}
+
 services:
   db:
     image: postgres:16-alpine
@@ -16,7 +24,7 @@ services:
 
   # Одноразовое применение миграций Alembic (api/bot стартуют после успеха)
   migrate:
-    build: .
+    build: *app-build
     command: alembic upgrade head
     env_file: .env
     environment:
@@ -26,7 +34,7 @@ services:
         condition: service_healthy
 
   api:
-    build: .
+    build: *app-build
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file: .env
@@ -43,7 +51,7 @@ services:
       - doc_data:/app/data/documents
 
   bot:
-    build: .
+    build: *app-build
     restart: unless-stopped
     command: python -m app.bot.runner
     env_file: .env
@@ -71,6 +79,19 @@ services:
       N8N_BASIC_AUTH_ACTIVE: "true"
       N8N_BASIC_AUTH_USER: ${N8N_USER:-admin}
       N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD:-changeme}
+      # Доступ к UI по http (без TLS): при входе с IP-адреса n8n блокирует secure-cookie.
+      # true (по умолчанию) — безопасно, вход по https или через SSH-туннель на localhost.
+      # false — разрешить вход по http напрямую (только для доверенной сети).
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-true}
+      # Разрешить доступ к переменным окружения ($env) в выражениях узлов.
+      # Нужно, чтобы воркфлоу брали ключ API из $env.UNIONE_API_KEY / $env.BREVO_API_KEY.
+      # false = разрешено (наш случай); true = заблокировано (тогда ключ — через Header Auth credential).
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: ${N8N_BLOCK_ENV_ACCESS_IN_NODE:-false}
+      # Ключи email-API для отправки писем по HTTPS (443), когда SMTP заблокирован:
+      #   UNIONE_API_KEY — Unisender Go / UniOne (РФ, рекомендуется при своём домене)
+      #   BREVO_API_KEY  — Brevo (вне РФ)
+      UNIONE_API_KEY: ${UNIONE_API_KEY:-}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
     volumes:
       - n8n_data:/home/node/.n8n
 

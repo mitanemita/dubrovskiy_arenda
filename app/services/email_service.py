@@ -17,7 +17,8 @@ _NEED_RECEIPT = {"invoice_new", "reminder", "overdue", "payment_confirmed_partia
 
 class EmailSender(Protocol):
     async def __call__(
-        self, to: str, subject: str, body: str, attachment: bytes | None = None, filename: str = "document.pdf"
+        self, to: str, subject: str, body: str, attachment: bytes | None = None,
+        filename: str = "document.pdf", meta: dict | None = None,
     ) -> None: ...
 
 
@@ -57,12 +58,16 @@ async def dispatch_email(
 
         attachment: bytes | None = None
         filename = "document.pdf"
+        # Метаданные документа для n8n (тип уведомления, арендатор) — чтобы вебхук
+        # мог единообразно собирать письмо для всех документов.
+        meta: dict = {"notification_type": notif.type, "tenant_name": tenant.name}
         if notif.type in _NEED_RECEIPT:
             resolved = await _resolve_lease_period(session, notif)
             if resolved is not None:
                 lease_id, period = resolved
                 try:
                     attachment, filename = await receipt_pdf(session, lease_id, period)
+                    meta.update({"document_type": "receipt", "period": period.strftime("%Y-%m")})
                 except Exception:
                     logger.exception("Не удалось сформировать квитанцию для уведомления %s", notif.id)
 
@@ -73,6 +78,7 @@ async def dispatch_email(
                 body=notif.body or "",
                 attachment=attachment,
                 filename=filename,
+                meta=meta,
             )
             notification_dispatch.mark_sent(notif)
             stats["sent"] += 1

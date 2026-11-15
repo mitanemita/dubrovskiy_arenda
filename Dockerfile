@@ -24,6 +24,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Версия сборки (передаёт deploy.sh) — видна в /version и в логах бота
+ARG GIT_COMMIT=unknown
+ARG GIT_BRANCH=unknown
+ARG BUILD_DATE=unknown
+ENV GIT_COMMIT=$GIT_COMMIT GIT_BRANCH=$GIT_BRANCH BUILD_DATE=$BUILD_DATE
+
 # Каталог для сгенерированных документов
 RUN mkdir -p data/documents
 
