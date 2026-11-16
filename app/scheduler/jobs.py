@@ -53,11 +53,16 @@ async def generate_period_charges(session: AsyncSession, today: date) -> dict:
 
     for lease, landlord_id in await _active_leases(session):
         rent = await billing_service.create_rent_charge(session, lease, period)
-        rent.status = ChargeStatus.issued
+        if rent.status == ChargeStatus.draft:
+            rent.status = ChargeStatus.issued
         stats["rent"] += 1
 
         elec = await billing_service.create_electricity_charge(session, lease, period)
-        if elec is None:
+        if elec is not None:
+            if elec.status == ChargeStatus.draft:
+                elec.status = ChargeStatus.issued
+            stats["electricity"] += 1
+        elif await billing_service.readings_missing(session, lease, period):
             stats["missing_readings"] += 1
             await notification_service.enqueue(
                 session,
@@ -68,12 +73,9 @@ async def generate_period_charges(session: AsyncSession, today: date) -> dict:
                 body=(
                     f"По договору №{lease.contract_no} за {period.strftime('%m.%Y')} "
                     f"нет показаний электросчётчика — электричество не начислено. "
-                    f"Внесите показания через бота."
+                    f"Внесите показания через бота: начисление появится сразу."
                 ),
             )
-        else:
-            elec.status = ChargeStatus.issued
-            stats["electricity"] += 1
 
     return stats
 

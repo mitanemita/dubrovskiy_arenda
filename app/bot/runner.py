@@ -11,6 +11,7 @@ from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import ErrorEvent
 
 from app.bot import notifier
+from app.bot.access import AccessMiddleware
 from app.bot.handlers import router
 from app.bot.handlers_admin import router as admin_router
 from app.bot.handlers_directory import router as directory_router
@@ -80,6 +81,9 @@ async def run() -> None:
 
     bot = build_bot()
     dp = Dispatcher()
+    # Доступ проверяется до фильтров и хендлеров — и для сообщений, и для кнопок.
+    dp.message.outer_middleware(AccessMiddleware())
+    dp.callback_query.outer_middleware(AccessMiddleware())
     dp.message.middleware(FSMCleanupMiddleware())
     dp.include_router(router)
     dp.include_router(admin_router)

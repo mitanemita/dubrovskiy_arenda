@@ -7,9 +7,10 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.enums import ChargeStatus, ChargeType
+from app.db.enums import ChargeStatus, ChargeType, LeaseStatus
 from app.db.models import Charge, Lease, Meter, MeterReading, Tenant
 from app.domain import billing
+from app.domain.allocation import charge_status
 from app.services import settings_service
 
 
@@ -58,56 +59,103 @@ async def create_rent_charge(session: AsyncSession, lease: Lease, period: date) 
     return charge
 
 
-async def create_electricity_charge(session: AsyncSession, lease: Lease, period: date) -> Charge | None:
-    """Начисление за электроэнергию по показаниям всех счётчиков помещения за период.
+async def _electricity_total(session: AsyncSession, lease: Lease, period: date) -> Decimal | None:
+    """Стоимость электроэнергии по показаниям всех счётчиков помещения за период.
 
-    Возвращает None, если за период нет ни одного показания (данных ещё нет —
-    вызывающий код уведомит арендодателя, требование ТЗ п.10).
+    None — если за период нет ни одного показания.
+    """
+    landlord_id = await _landlord_id_for_lease(session, lease)
+    tariff = await settings_service.get_decimal(session, landlord_id, "electricity_tariff")
+    default_coeff = await settings_service.get_decimal(session, landlord_id, "electricity_coeff")
+
+    rows = (
+        await session.execute(
+            select(Meter.coefficient, MeterReading.consumption)
+            .join(MeterReading, MeterReading.meter_id == Meter.id)
+            .where(Meter.premises_id == lease.premises_id, MeterReading.period == period)
+        )
+    ).all()
+    if not rows:
+        return None
+    total = Decimal("0")
+    for coefficient, consumption in rows:
+        coeff = coefficient if coefficient is not None else default_coeff
+        total += billing.electricity_amount(consumption, tariff, coeff)
+    return total
+
+
+async def readings_missing(session: AsyncSession, lease: Lease, period: date) -> bool:
+    """Есть ли у помещения договора счётчик без показаний за период."""
+    period = period_start(period)
+    meter_ids = (
+        await session.execute(select(Meter.id).where(Meter.premises_id == lease.premises_id))
+    ).scalars().all()
+    if not meter_ids:
+        return False
+    with_reading = (
+        await session.execute(
+            select(MeterReading.meter_id).where(
+                MeterReading.meter_id.in_(meter_ids), MeterReading.period == period
+            )
+        )
+    ).scalars().all()
+    return len(set(with_reading)) < len(meter_ids)
+
+
+async def create_electricity_charge(session: AsyncSession, lease: Lease, period: date) -> Charge | None:
+    """Начисление за электроэнергию за период (идемпотентно: существующее не меняется).
+
+    Возвращает None, если за период нет ни одного показания или расход нулевой
+    (например, введено только начальное показание счётчика).
     """
     period = period_start(period)
     existing = await _existing_charge(session, lease.id, ChargeType.electricity, period)
     if existing:
         return existing
 
-    landlord_id = await _landlord_id_for_lease(session, lease)
-    tariff = await settings_service.get_decimal(session, landlord_id, "electricity_tariff")
-    default_coeff = await settings_service.get_decimal(session, landlord_id, "electricity_coeff")
-
-    meters = (
-        await session.execute(select(Meter).where(Meter.premises_id == lease.premises_id))
-    ).scalars().all()
-
-    total = Decimal("0")
-    found_any = False
-    for meter in meters:
-        reading = (
-            await session.execute(
-                select(MeterReading).where(
-                    MeterReading.meter_id == meter.id, MeterReading.period == period
-                )
-            )
-        ).scalars().first()
-        if reading is None:
-            continue
-        found_any = True
-        coeff = meter.coefficient if meter.coefficient is not None else default_coeff
-        total += billing.electricity_amount(reading.consumption, tariff, coeff)
-
-    if not found_any:
+    total = await _electricity_total(session, lease, period)
+    if total is None or total <= 0:
         return None
 
-    due = billing.payment_due_date(period, lease.payment_day)
     charge = Charge(
         lease_id=lease.id,
         type=ChargeType.electricity,
         period=period,
         amount=total,
-        due_date=due,
+        due_date=billing.payment_due_date(period, lease.payment_day),
         status=ChargeStatus.draft,
         description=f"Электроэнергия за {period.strftime('%m.%Y')}",
     )
     session.add(charge)
     return charge
+
+
+async def sync_electricity_charges(
+    session: AsyncSession, premises_id: int, period: date, today: date
+) -> list[Charge]:
+    """После ввода/исправления показаний: создаёт или пересчитывает начисление
+    электричества за период по активным договорам помещения (за любой месяц)."""
+    period = period_start(period)
+    leases = (
+        await session.execute(
+            select(Lease).where(Lease.premises_id == premises_id, Lease.status == LeaseStatus.active)
+        )
+    ).scalars().all()
+    charges: list[Charge] = []
+    for lease in leases:
+        charge = await _existing_charge(session, lease.id, ChargeType.electricity, period)
+        if charge is None:
+            charge = await create_electricity_charge(session, lease, period)
+        else:
+            total = await _electricity_total(session, lease, period)
+            if total is not None and total != charge.amount:
+                charge.amount = total
+                charge.status = charge_status(
+                    charge.amount, charge.paid_amount, charge.due_date, today, already_sent=True
+                )
+        if charge is not None:
+            charges.append(charge)
+    return charges
 
 
 async def outstanding_principal(session: AsyncSession, lease_id: int, period: date) -> Decimal:
@@ -131,7 +179,8 @@ async def upsert_penalty_charge(
 ) -> Charge | None:
     """Создаёт/пересчитывает пеню за период на всю неоплаченную сумму.
 
-    Вызывается ежедневно при просрочке. Пеня пересчитывается на текущую дату.
+    Вызывается ежедневно при просрочке. Пеня пересчитывается на текущую дату
+    по ставке из настроек (penalty_rate, %/день).
     """
     period = period_start(period)
     base = await outstanding_principal(session, lease.id, period)
@@ -143,10 +192,14 @@ async def upsert_penalty_charge(
     if days <= 0:
         return None
 
-    amount = billing.penalty_amount(base, lease.penalty_rate, days)
+    landlord_id = await _landlord_id_for_lease(session, lease)
+    rate = await settings_service.get_decimal(session, landlord_id, "penalty_rate")
+    amount = billing.penalty_amount(base, rate, days)
 
     charge = await _existing_charge(session, lease.id, ChargeType.penalty, period)
     if charge is None:
+        if amount <= 0:  # ставка пени 0 — пеню не начисляем
+            return None
         charge = Charge(
             lease_id=lease.id,
             type=ChargeType.penalty,

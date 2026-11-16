@@ -101,6 +101,13 @@ cd dubrovskiy_arenda
 Версию видно в боте по `/version`: `inline-menu-… · main@<коммит> · собрано <дата>`.
 Данные в PostgreSQL сохраняются (том `pg_data`), `.env` не трогается.
 
+## Инструкции для пользователей
+
+- [1. Какие данные нужны от бухгалтера](docs/instructions/1_dannye_ot_buhgaltera.md)
+- [2. Первичный ввод данных и запуск](docs/instructions/2_pervichnyy_vvod.md)
+- [3. Ежемесячная работа](docs/instructions/3_ezhemesyachnaya_rabota.md)
+- [4. Изменения, исправления, отчёты](docs/instructions/4_izmeneniya_i_otchety.md)
+
 ## Локальный запуск (Windows / macOS)
 
 Пошагово: [docs/LOCAL_SETUP.md](docs/LOCAL_SETUP.md). Шпаргалка команд для Mac: [docs/MAC_COMMANDS.md](docs/MAC_COMMANDS.md).
@@ -124,4 +131,7 @@ pytest -q          # SQLite in-memory, без внешних сервисов
 ## Безопасность
 
 - Секреты только в `.env` (в git не попадают; см. `.gitignore`).
-- Доступ к боту — только Telegram ID из `ADMIN_IDS` и активным пользователям в БД.
+- Доступ к боту — только Telegram ID из `ADMIN_IDS` и активным пользователям в БД;
+  проверяется перед каждым сообщением и нажатием кнопки (`app/bot/access.py`).
+- PostgreSQL наружу не публикуется (порт доступен только внутри Docker-сети).
+- Резервные копии базы (`*.sql`) содержат данные арендаторов — в git не попадают.

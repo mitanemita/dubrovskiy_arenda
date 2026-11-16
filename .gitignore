@@ -13,8 +13,11 @@ venv/
 .ruff_cache/
 .pytest_cache/
 
-# Временные БД
+# Временные БД и резервные копии (содержат данные арендаторов)
 data/
+*.sql
+*.sql.gz
+*.dump
 scratch_*.db
 *.log
 

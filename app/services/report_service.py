@@ -7,8 +7,8 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.enums import ChargeType, LeaseStatus, PaymentStatus
-from app.db.models import Charge, Lease, Meter, MeterReading, Payment, Premises, Tenant
+from app.db.enums import ChargeType, LeaseStatus
+from app.db.models import Charge, Lease, Meter, MeterReading, Premises, Tenant
 from app.services.billing_service import period_start
 
 
@@ -108,19 +108,20 @@ async def monthly_summary(session: AsyncSession, landlord_id: int, period: date)
     }
 
 
-async def payments_by_premises(session: AsyncSession, landlord_id: int) -> list[dict]:
-    """Подтверждённые платежи в разрезе помещений."""
+async def payments_by_premises(session: AsyncSession, landlord_id: int, period: date) -> list[dict]:
+    """Оплачено по начислениям периода в разрезе помещений (как «Доход» в сводке)."""
     result = await session.execute(
-        select(Premises.label, Payment.amount, Payment.status)
+        select(Premises.label, func.sum(Charge.paid_amount))
         .join(Lease, Lease.premises_id == Premises.id)
-        .join(Payment, Payment.lease_id == Lease.id)
-        .where(Premises.landlord_id == landlord_id)
+        .join(Charge, Charge.lease_id == Lease.id)
+        .where(Premises.landlord_id == landlord_id, Charge.period == period_start(period))
+        .group_by(Premises.label)
+        .order_by(Premises.label)
     )
-    totals: dict[str, Decimal] = {}
-    for label, amount, status in result.all():
-        if status == PaymentStatus.confirmed or status == PaymentStatus.partial:
-            totals[label] = totals.get(label, Decimal("0")) + amount
-    return [{"premises": k, "confirmed_total": v} for k, v in sorted(totals.items())]
+    return [
+        {"premises": label, "confirmed_total": Decimal(str(total))}
+        for label, total in result.all() if total and total > 0
+    ]
 
 
 async def electricity_status(session: AsyncSession, landlord_id: int, period: date) -> list[dict]:

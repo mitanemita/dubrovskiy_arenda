@@ -564,7 +564,10 @@ async def reading_pick(callback: CallbackQuery, state: FSMContext) -> None:
             f"(расход {last.consumption} кВт·ч).\n"
         )
     else:
-        current = "Показаний ещё нет.\n"
+        current = (
+            "Показаний ещё нет. Первое показание станет <b>начальным</b>: расход от него "
+            "считается со следующего месяца.\n"
+        )
     await edit_or_send(callback.message,
         current +
         "Введите период и текущие показания в формате: ММ.ГГГГ значение\n"
@@ -602,6 +605,19 @@ async def reading_save(message: Message, state: FSMContext) -> None:
             reading = await reading_service.upsert_reading(
                 session, meter, period=period, curr_value=curr, source=DataSource.manual
             )
+            await session.flush()
+            # Начисление электричества за этот месяц создаётся/пересчитывается сразу;
+            # расход следующего месяца считается от этих показаний — пересчитываем и его.
+            charges = await billing_service.sync_electricity_charges(
+                session, meter.premises_id, period, date.today()
+            )
+            next_period = await reading_service.next_reading_period(session, meter.id, period)
+            if next_period is not None:
+                await billing_service.sync_electricity_charges(
+                    session, meter.premises_id, next_period, date.today()
+                )
+            consumption = reading.consumption
+            amounts = [c.amount for c in charges]
             await session.commit()
         except ValueError as exc:
             await session.rollback()
@@ -609,9 +625,14 @@ async def reading_save(message: Message, state: FSMContext) -> None:
             await wiz_reply(message, f"❌ {exc}", reply_markup=main_menu_kb())
             return
     await state.clear()
-    await wiz_reply(message, 
-        f"✅ Показания сохранены. Расход: {reading.consumption} кВт·ч.", reply_markup=main_menu_kb()
-    )
+    text = f"✅ Показания сохранены. Расход: {consumption} кВт·ч."
+    if amounts:
+        text += f"\n⚡ Начислено электричество за {period.strftime('%m.%Y')}: {sum(amounts)} ₽."
+    elif consumption == 0:
+        text += "\nРасход нулевой — начислять нечего (первое показание счётчика считается начальным)."
+    else:
+        text += "\nАктивного договора на это помещение нет — электричество не начислено."
+    await wiz_reply(message, text, reply_markup=main_menu_kb())
 
 
 # --- Менеджер задач --------------------------------------------------------
@@ -1408,9 +1429,9 @@ async def report_premises(callback: CallbackQuery, state: FSMContext) -> None:
     code = callback.data.split(":")[2]
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
-        by_prem = await report_service.payments_by_premises(session, lid) if lid else []
-    lines = [f"<b>🏠 Платежи по помещениям — {_period_ru(_period_from_code(code))}</b>"]
-    lines += [f"• {r['premises']}: {r['confirmed_total']} ₽" for r in by_prem] or ["— нет подтверждённых платежей"]
+        by_prem = await report_service.payments_by_premises(session, lid, _period_from_code(code)) if lid else []
+    lines = [f"<b>🏠 Оплачено по помещениям — {_period_ru(_period_from_code(code))}</b>"]
+    lines += [f"• {r['premises']}: {r['confirmed_total']} ₽" for r in by_prem] or ["— оплат за этот месяц нет"]
     await edit_or_send(callback.message, "\n".join(lines), reply_markup=_report_back_kb(code))
     await callback.answer()
 
