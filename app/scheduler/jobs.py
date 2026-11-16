@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +18,6 @@ from app.services import (
     billing_service,
     expense_service,
     notification_service,
-    settings_service,
     task_service,
 )
 from app.services.task_service import due_color_icon
@@ -43,23 +42,14 @@ async def _active_leases(session: AsyncSession) -> list[tuple[Lease, int]]:
     return [(row[0], row[1]) for row in result.all()]
 
 
-async def _rent_charge(session: AsyncSession, lease_id: int, period: date) -> Charge | None:
-    result = await session.execute(
-        select(Charge).where(
-            Charge.lease_id == lease_id, Charge.type == ChargeType.rent, Charge.period == period
-        )
-    )
-    return result.scalars().first()
-
-
 async def generate_period_charges(session: AsyncSession, today: date) -> dict:
-    """Начало периода: создать начисления и выставить квитанцию каждому арендатору.
+    """Начало периода: создать начисления по активным договорам.
 
     Аренда создаётся всегда; электричество — если есть показания, иначе арендодателю
-    уходит уведомление о нехватке данных (ТЗ п.10).
+    уходит Telegram-уведомление о нехватке данных.
     """
     period = billing_service.period_start(today)
-    stats = {"rent": 0, "electricity": 0, "missing_readings": 0, "invoices": 0}
+    stats = {"rent": 0, "electricity": 0, "missing_readings": 0}
 
     for lease, landlord_id in await _active_leases(session):
         rent = await billing_service.create_rent_charge(session, lease, period)
@@ -77,26 +67,13 @@ async def generate_period_charges(session: AsyncSession, today: date) -> dict:
                 subject="Нет показаний счётчика",
                 body=(
                     f"По договору №{lease.contract_no} за {period.strftime('%m.%Y')} "
-                    f"нет показаний электросчётчика — квитанция выставлена без электроэнергии. "
+                    f"нет показаний электросчётчика — электричество не начислено. "
                     f"Внесите показания через бота."
                 ),
             )
         else:
             elec.status = ChargeStatus.issued
             stats["electricity"] += 1
-
-        await session.flush()  # получить rent.id для привязки уведомления
-        await notification_service.enqueue(
-            session,
-            landlord_id=landlord_id,
-            channel=NotifChannel.email,
-            type="invoice_new",
-            tenant_id=lease.tenant_id,
-            subject=f"Квитанция за {period.strftime('%m.%Y')}",
-            body="Квитанция на оплату во вложении.",
-            related_charge_id=rent.id,
-        )
-        stats["invoices"] += 1
 
     return stats
 
@@ -131,8 +108,6 @@ async def _mark_overdue(session: AsyncSession, lease_id: int, period: date, toda
 
 async def generate_task_reminders(session: AsyncSession, today: date) -> int:
     """Напоминания по задачам: предварительное (за N дней) и в день срока."""
-    from datetime import timedelta
-
     count = 0
     for task in await task_service.open_with_due(session):
         due = task.due_date
@@ -169,55 +144,18 @@ async def generate_task_reminders(session: AsyncSession, today: date) -> int:
 
 
 async def run_daily(session: AsyncSession, today: date) -> dict:
-    """Ежедневно: напоминание за N дней до срока, просрочка (пеня + квитанция), задачи."""
-    stats = {"reminders": 0, "overdue": 0, "task_reminders": 0}
+    """Ежедневно: напоминания по задачам и просрочка (пересчёт пени + статус overdue)."""
+    stats = {"overdue": 0, "task_reminders": 0}
     stats["task_reminders"] = await generate_task_reminders(session, today)
 
-    for lease, landlord_id in await _active_leases(session):
-        reminder_days = await settings_service.get_int(session, landlord_id, "reminder_days_before")
-
+    for lease, _landlord_id in await _active_leases(session):
         for period in await _unpaid_periods(session, lease.id):
             outstanding = await billing_service.outstanding_principal(session, lease.id, period)
             if outstanding <= 0:
                 continue
-
-            due = billing.payment_due_date(period, lease.payment_day)
-            rent = await _rent_charge(session, lease.id, period)
-            anchor_id = rent.id if rent else None
-
-            # Напоминание за N дней до срока (один раз на период)
-            if (due - today).days == reminder_days and anchor_id is not None:
-                if not await notification_service.exists(session, type="reminder", related_charge_id=anchor_id):
-                    await notification_service.enqueue(
-                        session,
-                        landlord_id=landlord_id,
-                        channel=NotifChannel.email,
-                        type="reminder",
-                        tenant_id=lease.tenant_id,
-                        subject=f"Напоминание об оплате за {period.strftime('%m.%Y')}",
-                        body=f"Напоминаем об оплате до {due.strftime('%d.%m.%Y')}. Квитанция во вложении.",
-                        related_charge_id=anchor_id,
-                    )
-                    stats["reminders"] += 1
-
-            # Просрочка: пересчёт пени + ежедневная квитанция «просрочено»
-            if today > due:
+            if today > billing.payment_due_date(period, lease.payment_day):
                 await billing_service.upsert_penalty_charge(session, lease, period, today)
                 await _mark_overdue(session, lease.id, period, today)
-                days = billing.days_overdue(due, today)
-                await notification_service.enqueue(
-                    session,
-                    landlord_id=landlord_id,
-                    channel=NotifChannel.email,
-                    type="overdue",
-                    tenant_id=lease.tenant_id,
-                    subject=f"Оплата просрочена — {period.strftime('%m.%Y')}",
-                    body=(
-                        f"Оплата за {period.strftime('%m.%Y')} просрочена на {days} дн. "
-                        f"Начислена пеня. Актуальная квитанция во вложении."
-                    ),
-                    related_charge_id=anchor_id,
-                )
                 stats["overdue"] += 1
 
     return stats

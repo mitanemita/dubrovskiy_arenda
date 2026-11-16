@@ -91,8 +91,3 @@ async def list_expenses(session: AsyncSession, landlord_id: int, period: date) -
         .order_by(Expense.category)
     )
     return list(result.scalars().all())
-
-
-async def monthly_total(session: AsyncSession, landlord_id: int, period: date) -> Decimal:
-    expenses = await list_expenses(session, landlord_id, period)
-    return sum((e.amount for e in expenses), Decimal("0"))

@@ -4,7 +4,7 @@
 
 | Режим | Что запускается | Что нужно |
 |---|---|---|
-| **A. Полный (Docker)** — рекомендуется | PostgreSQL, API, бот, планировщик, n8n — как на сервере | Git, Docker Desktop |
+| **A. Полный (Docker)** — рекомендуется | PostgreSQL, бот с планировщиком — как на сервере | Git, Docker Desktop |
 | **B. Разработка без Docker** | тесты, карта `karta.py`, при желании бот на своей БД | Git, Python 3.11, (PostgreSQL) |
 
 > ⚠️ **Отдельный тестовый бот.** Если локально запустить бота с тем же `BOT_TOKEN`, что и на
@@ -47,11 +47,7 @@
    ```
 3. **Docker Desktop** (для режима A) — https://www.docker.com/products/docker-desktop/
    (версия для *Apple chip* или *Intel chip*), запустить и дождаться *Engine running*.
-4. **Для генерации PDF без Docker** (режим B, только если нужны УПД/квитанции):
-   ```bash
-   brew install pango
-   ```
-5. Проверка:
+4. Проверка:
    ```bash
    git --version && docker --version && docker compose version && python3.11 --version
    ```
@@ -66,7 +62,7 @@ git clone https://github.com/mitanemita/dubrovskiy_arenda.git
 cd dubrovskiy_arenda
 ```
 > Актуальная версия — ветка `main` (она скачивается по умолчанию). Обновлять потом
-> командой `./deploy.sh db migrate api bot` — см. `docs/MAC_COMMANDS.md`.
+> командой `./deploy.sh db migrate bot` — см. `docs/MAC_COMMANDS.md`.
 
 Создать `.env` из примера:
 - Windows: `copy .env.example .env`
@@ -80,10 +76,6 @@ ADMIN_IDS=<ваш Telegram ID>        # узнать у @userinfobot
 DB_USER=postgres
 DB_PASSWORD=localpass               # любой пароль для локальной БД
 DB_NAME=arenda
-WEBHOOK_TOKEN=local-secret
-EMAIL_PROVIDER=smtp                 # почта локально не нужна — письма просто не уйдут
-EMAIL_LOGIN=
-EMAIL_PASSWORD=
 ```
 
 ---
@@ -98,15 +90,12 @@ docker compose up -d --build
 Первичная инициализация (арендодатель, настройки) выполняется автоматически при старте
 бота. Ручной запуск при необходимости:
 ```bash
-docker compose run --rm api python -m app.scripts.bootstrap
+docker compose run --rm bot python -m app.scripts.bootstrap
 ```
 
 Проверка:
-- API: http://localhost:8000/health → `{"status":"ok"}`
-- Документация вебхуков: http://localhost:8000/docs
-- n8n: http://localhost:5678 (логин/пароль из `N8N_USER` / `N8N_PASSWORD`)
 - Бот: напишите тестовому боту `/menu` — откроется инлайн-меню в одном сообщении.
-- Демо-данные для проб: `/admin` → «🧪 Заполнить тестовыми данными».
+- Версия: `/version`.
 
 Полезное:
 ```bash
@@ -119,14 +108,6 @@ docker compose ps
 docker compose down
 ```
 (`down` останавливает, данные БД сохраняются в томе `pg_data`; `down -v` — удалит и данные.)
-
-Без n8n (быстрее и легче):
-```bash
-docker compose up -d --build db migrate api bot
-```
-
-Если порт занят (`port is already allocated`) — у вас уже работает PostgreSQL/другой сервис на
-5432/8000/5678: остановите его или поменяйте левую часть в `ports:` в `docker-compose.yml`.
 
 ---
 
@@ -159,28 +140,16 @@ pip install -r requirements.txt
 ```bash
 pytest -q
 ```
-```bash
-ruff check app
-```
-> На Windows тесты PDF-документов могут падать без GTK (WeasyPrint). Для работы с PDF
-> используйте режим A — в Docker-образе всё уже установлено.
 
-### Бот и API на локальной машине (по желанию)
-Нужен PostgreSQL. Проще всего поднять только базу в Docker:
-```bash
-docker compose up -d db
-```
-В `.env` оставить `DB_HOST=localhost`, затем:
+### Бот на локальной машине (по желанию)
+Нужен PostgreSQL, доступный на `localhost:5432` (сервис `db` из `docker-compose.yml` порт
+наружу не публикует). В `.env` оставить `DB_HOST=localhost`, затем:
 ```bash
 alembic upgrade head
 ```
 ```bash
 python -m app.scripts.bootstrap
 ```
-```bash
-uvicorn app.main:app --reload --port 8000
-```
-и во втором окне терминала (с активированным `.venv`):
 ```bash
 python -m app.bot.runner
 ```
@@ -223,7 +192,6 @@ playwright install chromium
 |---|---|
 | `TelegramConflictError: terminated by other getUpdates request` | Тот же токен бота запущен на сервере — используйте тестового бота |
 | `Failed building wheel for asyncpg` | Python 3.12/3.13 — поставьте 3.11 |
-| `ModuleNotFoundError: httpx` при `pytest` | Старый `requirements.txt` — `git pull` и `pip install -r requirements.txt` |
 | Docker: `WSL 2 installation is incomplete` | PowerShell от администратора: `wsl --install`, перезагрузка |
 | `password authentication failed` | Поменяли `DB_PASSWORD` после первого запуска — `docker compose down -v` (удалит локальную БД) и запустить заново |
 | Кракозябры в `.env` / названиях | Сохраните `.env` в кодировке UTF-8 |

@@ -33,7 +33,7 @@ async def upsert_reading(
     curr_value: Decimal,
     prev_value: Decimal | None = None,
     reading_date: date | None = None,
-    source: DataSource = DataSource.n8n,
+    source: DataSource = DataSource.manual,
     created_by_id: int | None = None,
 ) -> MeterReading:
     """Создаёт или обновляет показание за период. prev берётся из истории, если не задан.

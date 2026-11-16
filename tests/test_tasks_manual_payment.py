@@ -18,7 +18,7 @@ from app.db.enums import (
 )
 from app.db.models import Charge, Landlord, Lease, Notification, Premises, Task, Tenant
 from app.scheduler import jobs
-from app.services import billing_service, confirmation_service, payment_service, task_service
+from app.services import billing_service, payment_service, task_service
 
 
 @pytest_asyncio.fixture
@@ -114,16 +114,6 @@ async def test_create_from_lines_mixed(session, landlord):
     assert by_title["Уборка территории"].priority == TaskPriority.low
     assert by_title["Вывоз камней литера А"].due_date == date(2026, 12, 15)
     assert by_title["Задача без метки"].priority == TaskPriority.medium
-
-
-async def test_bulk_create(session, landlord):
-    created = await task_service.create_tasks_bulk(
-        session, landlord_id=landlord.id,
-        titles=["Задача A", "  ", "Задача B", "Задача C"], priority=TaskPriority.medium,
-    )
-    await session.flush()
-    assert len(created) == 3  # пустая строка пропущена
-    assert len(await task_service.list_tasks(session, landlord.id)) == 3
 
 
 async def test_edit_recomputes_due_and_resets_reminders(session, landlord):
@@ -273,8 +263,8 @@ async def test_manual_payment_full(session, lease):
 
     payment = await payment_service.register_payment(session, lease.id, Decimal("50000.00"))
     await session.flush()
-    result = await confirmation_service.process_payment_decision(
-        session, payment, approve=True, user_id=None, today=date(2026, 4, 6)
+    result = await payment_service.confirm_payment(
+        session, payment, confirmed_by_id=None, today=date(2026, 4, 6)
     )
     await session.flush()
 
@@ -282,8 +272,6 @@ async def test_manual_payment_full(session, lease):
     assert payment.status == PaymentStatus.confirmed
     rent = (await session.execute(select(Charge).where(Charge.type == ChargeType.rent))).scalars().first()
     assert rent.status == ChargeStatus.paid
-    # арендатор уведомлён
-    assert "payment_confirmed" in (await session.execute(select(Notification.type))).scalars().all()
 
 
 # --- Адресат и выполненные задачи ---

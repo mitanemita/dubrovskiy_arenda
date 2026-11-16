@@ -87,15 +87,6 @@ def premises_title(premises: Premises) -> str:
     return f"лит. {premises.litera} · {premises.label}" if premises.litera else premises.label
 
 
-async def set_premises_litera(session: AsyncSession, premises_id: int, litera: str) -> Premises:
-    """Задаёт литеру помещения (обязательна при добавлении арендатора в помещение)."""
-    premises = await session.get(Premises, premises_id)
-    if premises is None:
-        raise ValueError("Помещение не найдено.")
-    premises.litera = normalize_litera(litera, required=True)
-    return premises
-
-
 async def create_premises(
     session: AsyncSession,
     *,
@@ -124,14 +115,6 @@ async def list_premises(session: AsyncSession, landlord_id: int) -> list[Premise
         select(Premises).where(Premises.landlord_id == landlord_id).order_by(Premises.id)
     )
     return list(result.scalars().all())
-
-
-async def set_premises_status(session: AsyncSession, premises_id: int, is_occupied: bool) -> Premises | None:
-    """Переключает занятость помещения (свободно/занято), без привязки к арендатору."""
-    premises = await session.get(Premises, premises_id)
-    if premises is not None:
-        premises.is_occupied = is_occupied
-    return premises
 
 
 async def active_occupants(session: AsyncSession, landlord_id: int) -> dict[int, list[str]]:
@@ -235,10 +218,6 @@ async def list_leases(session: AsyncSession, landlord_id: int) -> list[Lease]:
         .order_by(Lease.id)
     )
     return list(result.scalars().all())
-
-
-async def get_lease(session: AsyncSession, lease_id: int) -> Lease | None:
-    return await session.get(Lease, lease_id)
 
 
 async def _sync_occupancy(session: AsyncSession, premises_id: int) -> None:

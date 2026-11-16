@@ -138,19 +138,6 @@ async def test_create_meter_bad_coeff(session, landlord):
         await directory_service.create_meter(session, premises_id=p.id, coefficient=Decimal("0"))
 
 
-# --- Статус помещения (свободно/занято) ---
-async def test_premises_status_default_and_toggle(session, landlord):
-    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад")
-    await session.flush()
-    assert p.is_occupied is False
-    await directory_service.set_premises_status(session, p.id, True)
-    await session.flush()
-    assert p.is_occupied is True
-    await directory_service.set_premises_status(session, p.id, False)
-    await session.flush()
-    assert p.is_occupied is False
-
-
 async def test_create_premises_occupied(session, landlord):
     p = await directory_service.create_premises(
         session, landlord_id=landlord.id, label="Офис", is_occupied=True
@@ -342,7 +329,3 @@ async def test_update_premises_litera_field(session, landlord):
     assert p.litera == "Е6"
     await directory_service.update_premises_field(session, p.id, "litera", "")
     assert p.litera is None
-    await directory_service.set_premises_litera(session, p.id, "К5")
-    assert p.litera == "К5"
-    with pytest.raises(ValueError):
-        await directory_service.set_premises_litera(session, p.id, " ")

@@ -946,7 +946,6 @@ async def _lease_finish(message: Message, tg_id: int, state: FSMContext, *, paym
                 litera=data.get("litera"),
             )
             await session.flush()
-            lease_id = lease.id
             # Сразу начисляем аренду за текущий месяц, чтобы договор был виден в отчёте.
             await billing_service.create_rent_charge(session, lease, _date.today())
             await session.commit()
