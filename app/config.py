@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     # --- Вебхуки n8n (общий секрет для авторизации входящих запросов) ---
     webhook_token: str = Field(default="", alias="WEBHOOK_TOKEN")
 
+    # --- Карта базы по ссылке (открывается прямо в Telegram) ---
+    # Внешний адрес API, напр. https://karta.example.ru или http://1.2.3.4:8000.
+    # https -> кнопка Mini App (карта внутри Telegram); http -> обычная ссылка.
+    # Пусто -> карта приходит HTML-файлом (на части Android открывается как код).
+    public_base_url: str = Field(default="", alias="PUBLIC_BASE_URL")
+    karta_link_days: int = Field(default=30, alias="KARTA_LINK_DAYS")
+
     # --- Приложение ---
     timezone: str = Field(default="Europe/Moscow", alias="TZ")
 

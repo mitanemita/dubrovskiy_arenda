@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.karta import router as karta_router
 from app.api.webhooks import router as webhooks_router
 from app.utils.logger import logger
 
@@ -33,6 +34,7 @@ app = FastAPI(
 )
 
 app.include_router(webhooks_router)
+app.include_router(karta_router)
 
 
 @app.get("/health", tags=["service"])

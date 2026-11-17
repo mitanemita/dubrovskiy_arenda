@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 
 # Метка версии интерфейса бота — поднимай при каждом изменении бота.
-BOT_UI_VERSION = "inline-menu-2026.11.15.1"
+BOT_UI_VERSION = "inline-menu-2026.11.17.1"
 
 
 def build_info() -> dict[str, str]:
