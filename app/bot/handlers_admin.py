@@ -27,9 +27,12 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    WebAppInfo,
 )
 from sqlalchemy import select
 
+from app.services import karta_link
+from app.utils.logger import logger
 from app.bot.keyboards import cancel_kb, finance_back_kb, finance_menu_kb, main_menu_kb
 from app.db.base import async_session_factory
 from app.db.enums import ChargeType, DataSource, ExpenseCategory, LeaseStatus
@@ -1508,13 +1511,23 @@ async def report_pick_month(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-# --- Карта базы (HTML-файл из актуальных данных БД) ------------------------
-def _map_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+# --- Карта базы ---------------------------------------------------------------
+# Если задан PUBLIC_BASE_URL — панель с кнопкой «🗺 Открыть карту» (страница
+# собирается из БД при каждом открытии и сразу открывается на любом телефоне).
+# Иначе (или если ссылку отправить не удалось) — как раньше, HTML-файлом.
+def _map_kb(url: str | None = None, *, private: bool = True) -> InlineKeyboardMarkup:
+    rows = []
+    if url:
+        if private and url.startswith("https://"):
+            rows.append([InlineKeyboardButton(text="🗺 Открыть карту", web_app=WebAppInfo(url=url))])
+        else:
+            rows.append([InlineKeyboardButton(text="🗺 Открыть карту", url=url)])
+    rows += [
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="map:refresh")],
         [InlineKeyboardButton(text="◀️ Учёт и финансы", callback_data="menu:finance"),
          InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
-    ])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _build_map(tg_id: int) -> tuple[BufferedInputFile, str] | None:
@@ -1527,11 +1540,42 @@ async def _build_map(tg_id: int) -> tuple[BufferedInputFile, str] | None:
     return file, karta_service.caption(summary)
 
 
+async def _build_map_link(tg_id: int) -> tuple[str, str] | None:
+    """(ссылка, текст панели) или None — тогда карта отправляется файлом."""
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, tg_id)
+        if lid is None:
+            return None
+        url = karta_link.map_url(lid)
+        if url is None:
+            return None
+        data, not_on_plan = await karta_service.build_data(session, lid)
+    summary = karta_service.summarize(data, not_on_plan, now=datetime.now())
+    return url, karta_service.caption(summary, link=True)
+
+
+async def _send_map_link(message: Message, tg_id: int) -> bool:
+    """Показывает панель со ссылкой на карту. False — нужно отправить файлом."""
+    try:
+        built = await _build_map_link(tg_id)
+        if built is None:
+            return False
+        url, text = built
+        private = getattr(getattr(message, "chat", None), "type", "private") == "private"
+        await edit_or_send(message, text, reply_markup=_map_kb(url, private=private))
+        return True
+    except Exception as exc:  # неверный PUBLIC_BASE_URL и т.п. — не ломаемся, шлём файл
+        logger.warning("Карта по ссылке не отправлена, отправляю файлом: %s", exc)
+        return False
+
+
 @router.callback_query(F.data == "menu:map")
 async def base_map(callback: CallbackQuery, state: FSMContext) -> None:
-    """Карта базы: файл становится панелью чата, прежнее сообщение удаляется."""
+    """Карта базы: ссылка (если настроена) или файл; файл становится панелью чата."""
     await state.clear()
     await callback.answer("Собираю карту…")
+    if await _send_map_link(callback.message, callback.from_user.id):
+        return
     await edit_or_send(callback.message, "⏳ Собираю карту базы…")
     built = await _build_map(callback.from_user.id)
     if built is None:
@@ -1545,8 +1589,11 @@ async def base_map(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "map:refresh")
 async def base_map_refresh(callback: CallbackQuery, state: FSMContext) -> None:
-    """Пересобирает карту и заменяет файл в том же сообщении."""
+    """Пересобирает карту: новая ссылка/сводка или замена файла в том же сообщении."""
     await state.clear()
+    if await _send_map_link(callback.message, callback.from_user.id):
+        await callback.answer("Карта обновлена")
+        return
     built = await _build_map(callback.from_user.id)
     if built is None:
         await callback.answer("Нет данных", show_alert=True)

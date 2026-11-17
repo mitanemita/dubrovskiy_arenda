@@ -116,3 +116,12 @@ paid_amount, status) + `payments` + `payment_allocations` (разнос плат
   `python -m pytest -q`.
 - Схему БД меняешь → новая миграция в `alembic/versions/` (цепочка down_revision)
   и поле в `app/db/models.py`.
+
+## Карта базы по ссылке (с 17.11.2026)
+- «🗺 Карта базы»: если в `.env` задан `PUBLIC_BASE_URL` — панель с кнопкой
+  «🗺 Открыть карту» (https → Mini App внутри Telegram, http → ссылка). Страницу
+  `GET /karta/<token>` отдаёт сам бот (`app/bot/karta_web.py`, aiohttp из aiogram,
+  порт `KARTA_PORT`, по умолчанию 8080) и собирает её из БД при КАЖДОМ открытии.
+  Токен подписан HMAC от `BOT_TOKEN` (`app/services/karta_link.py`), срок `KARTA_LINK_DAYS` (30).
+- `PUBLIC_BASE_URL` пуст или Telegram отверг кнопку → как раньше, HTML-файлом
+  (на части Android, напр. Samsung Fold, файл открывается как код — поэтому ссылка).

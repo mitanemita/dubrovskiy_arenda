@@ -71,6 +71,9 @@ tests/                тесты (SQLite in-memory)
    - `BOT_TOKEN` — токен бота от @BotFather
    - `ADMIN_IDS` — ваш Telegram ID (через запятую)
    - `DB_USER` / `DB_PASSWORD` / `DB_NAME` — доступ к PostgreSQL
+   - `PUBLIC_BASE_URL` (необязательно) — внешний адрес бота для «🗺 Карта базы»,
+     напр. `http://IP-сервера:8080` или `https://karta.ваш-домен.ru`. С ним карта
+     открывается кнопкой прямо в Telegram; без него приходит HTML-файлом.
 4. Запустить (миграции применятся автоматически перед стартом):
    ```bash
    docker compose up -d --build

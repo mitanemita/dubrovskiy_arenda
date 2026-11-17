@@ -41,6 +41,9 @@ services:
     env_file: .env
     environment:
       DB_HOST: db
+    # Страница «Карта базы» по ссылке (работает, только если в .env задан PUBLIC_BASE_URL)
+    ports:
+      - "${KARTA_PORT:-8080}:${KARTA_PORT:-8080}"
     depends_on:
       migrate:
         condition: service_completed_successfully

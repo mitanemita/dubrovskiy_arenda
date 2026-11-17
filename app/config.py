@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     db_password: str = Field(default="", alias="DB_PASSWORD")
     db_name: str = Field(default="arenda", alias="DB_NAME")
 
+    # --- Карта базы по ссылке (открывается прямо в Telegram) ---
+    # Внешний адрес, по которому доступен бот, напр. https://karta.example.ru или
+    # http://1.2.3.4:8080. https -> Mini App внутри Telegram; http -> обычная ссылка.
+    # Пусто -> веб-страница не запускается, карта приходит HTML-файлом (как раньше).
+    public_base_url: str = Field(default="", alias="PUBLIC_BASE_URL")
+    karta_port: int = Field(default=8080, alias="KARTA_PORT")  # порт внутри контейнера
+    karta_link_days: int = Field(default=30, alias="KARTA_LINK_DAYS")
+
     # --- Приложение ---
     timezone: str = Field(default="Europe/Moscow", alias="TZ")
 

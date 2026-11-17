@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import ErrorEvent
 
-from app.bot import notifier
+from app.bot import karta_web, notifier
 from app.bot.access import AccessMiddleware
 from app.bot.handlers import router
 from app.bot.handlers_admin import router as admin_router
@@ -118,6 +118,7 @@ async def run() -> None:
     scheduler = build_scheduler()
     scheduler.start()
     dispatch_task = asyncio.create_task(_dispatch_loop(bot))
+    karta_runner = await karta_web.start()  # None, если PUBLIC_BASE_URL не задан
     logger.info("Бот и планировщик запущены (polling), версия: %s", version_line())
     try:
         # drop_pending_updates — чистим backlog (в т.ч. после сбоя/двойного запуска).
@@ -125,6 +126,8 @@ async def run() -> None:
     finally:
         scheduler.shutdown(wait=False)
         dispatch_task.cancel()
+        if karta_runner is not None:
+            await karta_runner.cleanup()
         await bot.session.close()
 
 
