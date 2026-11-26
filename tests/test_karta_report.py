@@ -76,6 +76,32 @@ async def test_latin_lookalike_litera_matches(session, landlord):
     assert "200000 ₽" in html.decode() and summary["not_on_plan"] == []
 
 
+@pytest.mark.parametrize("litera", ["Г3", "г 3", "ГЗ"])
+async def test_g3_litera_matches_map_and_legacy_spelling(session, landlord, litera):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Помещение", litera=litera)
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    p.readiness = "ready"
+    p.area = Decimal("88.6")
+    await session.flush()
+    html, summary = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    assert _poly(text, "Г3") == "c-free"
+    assert re.search(r'data-a="Г3"[^>]*>88,6 м²</text>', text)
+    assert summary["not_on_plan"] == []
+
+
+def test_map_litera_identifiers_use_cyrillic_letter_and_optional_number():
+    _, items = karta_service._template()
+    for item in items:
+        identifier = item["id"]
+        if re.fullmatch(r"T[1-9]\d*", identifier):
+            continue  # служебные технические помещения
+        assert re.fullmatch(r"[А-ЯЁ]\d*", identifier), identifier
+    assert karta_service._key("З") == "З"
+    assert karta_service._key("ГЗ") == karta_service._key("Г3")
+
+
 # --- Хендлеры: одно сообщение-панель ----------------------------------------
 @pytest_asyncio.fixture
 async def bot_env(monkeypatch):
@@ -253,6 +279,10 @@ async def test_map_uses_database_area_rent_and_rate(session, landlord):
     await session.flush()
     html, summary = await karta_service.render_html(session, landlord.id)
     text = html.decode()
+    card = re.search(r'<div class="info a1" id="i-Д".*?</div></div>', text).group(0)
+    assert re.search(r'data-f="db_area"><span>Площадь</span><span>200 м²</span>', card)
+    assert 'Площадь по плану' not in card and 'Площадь по учёту' not in card
+    assert re.search(r'<text[^>]*data-a="Д"[^>]*>200 м²</text>', text)
     assert _poly(text, "Д") == "c-busy"  # действующий арендатор определяет занятость
     assert "Арендатор" in text and "60000,5 ₽" in text
     assert re.search(r'data-f="rate"><span>Предполагаемая ставка</span><span>300,25 ₽/м²</span>', text)
@@ -260,6 +290,29 @@ async def test_map_uses_database_area_rent_and_rate(session, landlord):
     assert "Не готово к сдаче" in text
     assert summary["rent_total"] == Decimal("60000.50")
     assert "60 000,50 ₽" in karta_service.caption(summary)
+
+
+async def test_map_area_missing_does_not_show_old_plan_total(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Д", litera="Д")
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    html, _ = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    assert re.search(r'data-f="db_area"><span>Площадь</span><span>не указана</span>', text)
+    assert re.search(r'<text[^>]*data-a="Д"[^>]*></text>', text)
+
+
+async def test_m_shows_database_area_without_plan_area(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="М", litera="М")
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    p.area = Decimal("123.45")
+    await session.flush()
+    html, _ = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    card = re.search(r'<div class="info a1" id="i-М".*?</div></div>', text).group(0)
+    assert re.search(r'data-f="db_area"><span>Площадь</span><span>123,45 м²</span>', card)
+    assert 'Площадь по плану' not in card and 'Площадь по учёту' not in card
 
 
 async def test_missing_or_ambiguous_area_does_not_invent_fact_rate(session, landlord):
