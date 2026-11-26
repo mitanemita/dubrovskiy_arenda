@@ -119,10 +119,19 @@ def test_accountant_role_exists():
     assert UserRole.accountant.value == "accountant"
 
 
-async def test_payments_by_premises(session, env):
-    p = Payment(lease_id=env["lease"].id, amount=Decimal("50000.00"), status=PaymentStatus.confirmed)
-    session.add(p)
+async def test_payments_by_premises_is_per_month(session, env):
+    """Отчёт по помещениям — только оплаты по начислениям выбранного месяца."""
+    from app.services import payment_service
+
+    april, may = date(2026, 4, 1), date(2026, 5, 1)
+    apr = await billing_service.create_rent_charge(session, env["lease"], april)
+    await billing_service.create_rent_charge(session, env["lease"], may)
+    await session.flush()
+    await payment_service.pay_charge(session, apr, Decimal("30000.00"), confirmed_by_id=None, today=april)
     await session.flush()
 
-    report = await report_service.payments_by_premises(session, env["landlord"].id)
-    assert report == [{"premises": "Склад", "confirmed_total": Decimal("50000.00")}]
+    lid = env["landlord"].id
+    assert await report_service.payments_by_premises(session, lid, april) == [
+        {"premises": "Склад", "confirmed_total": Decimal("30000.00")}
+    ]
+    assert await report_service.payments_by_premises(session, lid, may) == []

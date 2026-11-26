@@ -46,7 +46,7 @@ def build_scheduler() -> AsyncIOScheduler:
         id="monthly_charges",
         replace_existing=True,
     )
-    # Ежедневно — напоминания и просрочка
+    # Ежедневно — напоминания по задачам и просрочка (пеня)
     scheduler.add_job(
         _run_daily,
         CronTrigger(hour=8, minute=0),

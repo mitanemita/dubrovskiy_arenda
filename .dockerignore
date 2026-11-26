@@ -11,8 +11,5 @@ tests/
 .env
 *.env
 !.env.example
-data/documents/
 scratch_*.db
-бот_квитанции/data/logs/*.log
-бот_квитанции/data/files/*
 README.md

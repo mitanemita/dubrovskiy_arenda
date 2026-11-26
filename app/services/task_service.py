@@ -30,12 +30,6 @@ NUM_PRIORITY = {1: TaskPriority.high, 2: TaskPriority.medium, 3: TaskPriority.lo
 DURATION_DAYS = {TaskPriority.high: 3, TaskPriority.medium: 7, TaskPriority.low: 25}
 LEAD_DAYS = {TaskPriority.high: 1, TaskPriority.medium: 2, TaskPriority.low: 5}
 
-PRIORITY_LABEL = {
-    TaskPriority.high: "🔴 1 (3 дня)",
-    TaskPriority.medium: "🟡 2 (7 дней)",
-    TaskPriority.low: "🟢 3 (25 дней)",
-}
-
 # Категория без цвета (цвет теперь отражает остаток дней до срока, а не категорию)
 PRIORITY_TEXT = {
     TaskPriority.high: "1 (3 дня)",
@@ -106,27 +100,6 @@ async def set_due_date(session: AsyncSession, task_id: int, due_date: date) -> T
     task.remind_pre_sent = False
     task.remind_due_sent = False
     return task
-
-
-async def create_tasks_bulk(
-    session: AsyncSession,
-    *,
-    landlord_id: int,
-    titles: list[str],
-    priority: TaskPriority = TaskPriority.medium,
-    created_by_id: int | None = None,
-    today: date | None = None,
-) -> list[Task]:
-    """Добавляет несколько задач списком (по одной на строку, единый приоритет)."""
-    tasks = []
-    for title in titles:
-        title = title.strip()
-        if title:
-            tasks.append(await create_task(
-                session, landlord_id=landlord_id, title=title, priority=priority,
-                created_by_id=created_by_id, today=today,
-            ))
-    return tasks
 
 
 def parse_task_line(line: str, *, default_priority: TaskPriority = TaskPriority.medium) -> tuple[str, TaskPriority, date | None] | None:

@@ -50,12 +50,13 @@ async def test_generate_period_charges_with_readings(session, env):
     stats = await jobs.generate_period_charges(session, date(2026, 4, 1))
     await session.flush()
 
-    assert stats == {"rent": 1, "electricity": 1, "missing_readings": 0, "invoices": 1}
+    assert stats == {"rent": 1, "electricity": 1, "missing_readings": 0}
     charges = (await session.execute(select(Charge))).scalars().all()
     kinds = {c.type: c for c in charges}
     assert kinds[ChargeType.rent].status == ChargeStatus.issued
     assert kinds[ChargeType.electricity].amount == Decimal("1680.00")
-    assert "invoice_new" in await _notif_types(session)
+    # писем арендаторам нет
+    assert await _notif_types(session) == []
 
 
 async def test_generate_period_charges_missing_readings(session, env):
@@ -63,40 +64,10 @@ async def test_generate_period_charges_missing_readings(session, env):
     await session.flush()
     assert stats["missing_readings"] == 1
     # электричество не создано, но аренда и уведомление арендодателю — есть
-    assert "missing_readings" in await _notif_types(session)
-    assert "invoice_new" in await _notif_types(session)
+    assert await _notif_types(session) == ["missing_readings"]
 
 
-async def test_reminder_two_days_before(session, env):
-    # период апрель, срок 05.04 -> напоминание 03.04
-    await jobs.generate_period_charges(session, date(2026, 4, 1))
-    await session.flush()
-
-    stats = await jobs.run_daily(session, date(2026, 4, 3))
-    await session.flush()
-    assert stats["reminders"] == 1
-    assert "reminder" in await _notif_types(session)
-
-    # повторный прогон в тот же день не дублирует напоминание
-    stats2 = await jobs.run_daily(session, date(2026, 4, 3))
-    assert stats2["reminders"] == 0
-
-
-async def test_no_reminder_if_paid(session, env):
-    await jobs.generate_period_charges(session, date(2026, 4, 1))
-    await session.flush()
-    # помечаем аренду оплаченной
-    rent = (await session.execute(
-        select(Charge).where(Charge.type == ChargeType.rent)
-    )).scalars().first()
-    rent.paid_amount = rent.amount
-    await session.flush()
-
-    stats = await jobs.run_daily(session, date(2026, 4, 3))
-    assert stats["reminders"] == 0
-
-
-async def test_overdue_creates_penalty_and_notice(session, env):
+async def test_overdue_creates_penalty(session, env):
     session.add(MeterReading(meter_id=env["meter"].id, period=date(2026, 4, 1),
                              prev_value=Decimal("15230"), curr_value=Decimal("15350"), consumption=Decimal("120")))
     await session.flush()
@@ -114,7 +85,6 @@ async def test_overdue_creates_penalty_and_notice(session, env):
     assert penalty is not None
     # база 51 680 (аренда+электричество) × 0.5% × 7 = 1808.80
     assert penalty.amount == Decimal("1808.80")
-    assert "overdue" in await _notif_types(session)
 
     # начисления помечены overdue
     rent = (await session.execute(select(Charge).where(Charge.type == ChargeType.rent))).scalars().first()

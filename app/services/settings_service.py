@@ -32,11 +32,6 @@ async def get_decimal(session: AsyncSession, landlord_id: int, key: str) -> Deci
     return Decimal(await _get_with_default(session, landlord_id, key))
 
 
-async def get_int(session: AsyncSession, landlord_id: int, key: str) -> int:
-    """Настройка как int (с учётом значения по умолчанию)."""
-    return int(await _get_with_default(session, landlord_id, key))
-
-
 async def set_setting(session: AsyncSession, landlord_id: int, key: str, value: str) -> Setting:
     """Создаёт или обновляет настройку. Коммит — на стороне вызывающего кода."""
     result = await session.execute(

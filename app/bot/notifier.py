@@ -5,7 +5,6 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards import payment_decision_kb
 from app.db.enums import NotifChannel
 from app.services import notification_dispatch
 from app.services.task_service import TASK_NOTIF_TYPE
@@ -15,14 +14,11 @@ from app.utils.logger import logger
 class Sender(Protocol):
     """Минимальный интерфейс отправки (реализуется aiogram Bot.send_message)."""
 
-    async def __call__(self, chat_id: int, text: str, reply_markup=None) -> None: ...
+    async def __call__(self, chat_id: int, text: str) -> None: ...
 
 
 async def dispatch_telegram(session: AsyncSession, send: Sender) -> dict:
-    """Отправляет все очередные TG-уведомления. Возвращает статистику.
-
-    Для типа payment_confirm_request прикрепляет кнопки Подтвердить/Отклонить.
-    """
+    """Отправляет все очередные TG-уведомления. Возвращает статистику."""
     stats = {"sent": 0, "failed": 0}
     # Напоминания по задачам (task_reminder) в чат не шлём — они копятся как
     # «входящие» и показываются в разделе «Задачи».
@@ -37,16 +33,12 @@ async def dispatch_telegram(session: AsyncSession, send: Sender) -> dict:
             stats["failed"] += 1
             continue
 
-        markup = None
-        if notif.type == "payment_confirm_request" and notif.related_payment_id:
-            markup = payment_decision_kb(notif.related_payment_id)
-
         text = f"<b>{notif.subject or 'Уведомление'}</b>\n{notif.body or ''}".strip()
 
         ok = True
         for chat_id in recipients:
             try:
-                await send(chat_id=chat_id, text=text, reply_markup=markup)
+                await send(chat_id=chat_id, text=text)
             except Exception:
                 ok = False
                 logger.exception("Не удалось отправить TG-уведомление %s в чат %s", notif.id, chat_id)

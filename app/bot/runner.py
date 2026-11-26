@@ -1,4 +1,4 @@
-"""Запуск Telegram-бота: polling + фоновая доставка уведомлений из очереди."""
+"""Запуск Telegram-бота: polling + планировщик + фоновая доставка уведомлений из очереди."""
 from __future__ import annotations
 
 import asyncio
@@ -10,25 +10,19 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import ErrorEvent
 
-from app.bot import notifier
+from app.bot import karta_web, notifier
+from app.bot.access import AccessMiddleware
 from app.bot.handlers import router
 from app.bot.handlers_admin import router as admin_router
-from app.bot.handlers_admin_tools import router as admin_tools_router
 from app.bot.handlers_directory import router as directory_router
 from app.config import get_settings
 from app.db.base import async_session_factory
-from app.email.sender import send_email
-from app.services import email_service
+from app.scheduler.runner import build_scheduler
 from app.utils.logger import logger
+from app.version import version_line
 
 # Интервал проверки очереди TG-уведомлений, сек
 DISPATCH_INTERVAL = 15
-
-
-def _ui_version() -> str:
-    from app.version import version_line
-
-    return version_line()
 
 
 class FSMCleanupMiddleware(BaseMiddleware):
@@ -59,26 +53,23 @@ def build_bot() -> Bot:
 
 async def _dispatch_loop(bot: Bot) -> None:
     """Периодически отправляет очередные TG-уведомления."""
-    async def _send(chat_id: int, text: str, reply_markup=None) -> None:
-        await bot.send_message(chat_id, text, reply_markup=reply_markup)
+    async def _send(chat_id: int, text: str) -> None:
+        await bot.send_message(chat_id, text)
 
     while True:
         try:
             async with async_session_factory() as session:
                 tg_stats = await notifier.dispatch_telegram(session, _send)
-                email_stats = await email_service.dispatch_email(session, send_email)
                 await session.commit()
                 if any(tg_stats.values()):
                     logger.info("TG-уведомления: %s", tg_stats)
-                if any(email_stats.values()):
-                    logger.info("Email-уведомления: %s", email_stats)
         except Exception:
             logger.exception("Ошибка цикла доставки уведомлений")
         await asyncio.sleep(DISPATCH_INTERVAL)
 
 
 async def run() -> None:
-    """Точка входа бота (polling + фоновая доставка)."""
+    """Точка входа бота (polling + планировщик + фоновая доставка)."""
     # Идемпотентная первичная инициализация: арендодатель + владельцы + настройки.
     # Гарантирует, что разделы бота не падают с «Нет арендодателя» на чистой БД.
     try:
@@ -90,10 +81,12 @@ async def run() -> None:
 
     bot = build_bot()
     dp = Dispatcher()
+    # Доступ проверяется до фильтров и хендлеров — и для сообщений, и для кнопок.
+    dp.message.outer_middleware(AccessMiddleware())
+    dp.callback_query.outer_middleware(AccessMiddleware())
     dp.message.middleware(FSMCleanupMiddleware())
     dp.include_router(router)
     dp.include_router(admin_router)
-    dp.include_router(admin_tools_router)
     dp.include_router(directory_router)
 
     @dp.error()
@@ -121,13 +114,20 @@ async def run() -> None:
         except Exception:
             logger.exception("Не удалось уведомить пользователя об ошибке")
 
+    # Планировщик: начисления 1-го числа, ежедневно — пеня и напоминания по задачам.
+    scheduler = build_scheduler()
+    scheduler.start()
     dispatch_task = asyncio.create_task(_dispatch_loop(bot))
-    logger.info("Бот запущен (polling), версия: %s", _ui_version())
+    karta_runner = await karta_web.start()  # None, если PUBLIC_BASE_URL не задан
+    logger.info("Бот и планировщик запущены (polling), версия: %s", version_line())
     try:
         # drop_pending_updates — чистим backlog (в т.ч. после сбоя/двойного запуска).
         await dp.start_polling(bot, drop_pending_updates=True)
     finally:
+        scheduler.shutdown(wait=False)
         dispatch_task.cancel()
+        if karta_runner is not None:
+            await karta_runner.cleanup()
         await bot.session.close()
 
 

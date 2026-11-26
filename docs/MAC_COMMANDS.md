@@ -32,7 +32,7 @@ ls
 ### Одной командой (рекомендуется)
 Запускает Docker, ждёт, пока он будет готов, и запускает бота:
 ```bash
-open -a Docker; until docker info >/dev/null 2>&1; do sleep 2; done; docker compose up -d db migrate api bot
+open -a Docker; until docker info >/dev/null 2>&1; do sleep 2; done; docker compose up -d db migrate bot
 ```
 
 ### По шагам
@@ -48,10 +48,10 @@ docker info --format '{{.ServerVersion}}'
 
 Запустить бота, API и базу:
 ```bash
-docker compose up -d db migrate api bot
+docker compose up -d db migrate bot
 ```
 
-Проверить, что всё работает (`db`, `api`, `bot` — *running*; `migrate` — *exited (0)*, это нормально):
+Проверить, что всё работает (`db`, `bot` — *running*; `migrate` — *exited (0)*, это нормально):
 ```bash
 docker compose ps
 ```
@@ -105,7 +105,7 @@ Docker должен быть запущен (раздел 2). Одна кома�
 `main`, скачивает последнюю версию с GitHub, пересобирает, применяет миграции базы и
 проверяет, что запущен именно свежий коммит:
 ```bash
-./deploy.sh db migrate api bot
+./deploy.sh db migrate bot
 ```
 В конце должно быть `✅ Запущена актуальная версия: … main@<коммит> …`.
 
@@ -130,11 +130,6 @@ docker compose exec bot python -c "from app.version import version_line; print(v
 Логи бота в реальном времени (выход — `Ctrl+C`):
 ```bash
 docker compose logs -f --tail 100 bot
-```
-
-Логи API:
-```bash
-docker compose logs -f --tail 100 api
 ```
 
 Логи миграций (если бот не стартует после обновления):
@@ -201,7 +196,7 @@ docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' < back
 
 ## 8. Карта базы
 
-В боте: `/menu` → **📊 Отчёты** → **🗺 Карта базы**.
+В боте: `/menu` → **💼 Учёт и финансы** → **🗺 Карта базы**.
 
 Открыть файл карты-шаблона на Маке:
 ```bash
@@ -229,7 +224,7 @@ open -e .env
 
 После изменения `.env` перезапустите:
 ```bash
-docker compose up -d db migrate api bot
+docker compose up -d db migrate bot
 ```
 
 ---
@@ -241,10 +236,10 @@ docker compose up -d db migrate api bot
 | В папку | `cd ~/работа/dubrovskiy_arenda` |
 | Запустить Docker | `open -a Docker` (подождать, пока кит перестанет мигать) |
 | Docker готов? | `docker info --format '{{.ServerVersion}}'` |
-| Запустить бота | `docker compose up -d db migrate api bot` |
+| Запустить бота | `docker compose up -d db migrate bot` |
 | Статус | `docker compose ps` |
 | Логи бота | `docker compose logs -f --tail 100 bot` |
-| Обновить до актуальной | `./deploy.sh db migrate api bot` |
+| Обновить до актуальной | `./deploy.sh db migrate bot` |
 | Какая версия запущена | `/version` в боте |
 | Перезапустить бота | `docker compose restart bot` |
 | Остановить бота | `docker compose down` |

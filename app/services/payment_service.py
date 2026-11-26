@@ -1,4 +1,4 @@
-"""Сервис платежей: регистрация, подтверждение/отклонение, разнос по начислениям."""
+"""Сервис платежей: ручная отметка оплаты и разнос по начислениям."""
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -20,19 +20,14 @@ async def register_payment(
     lease_id: int,
     amount: Decimal,
     *,
-    period: date | None = None,
     payment_date: date | None = None,
-    proof_file: str | None = None,
-    source: DataSource = DataSource.manual,
 ) -> Payment:
-    """Создаёт платёж в статусе pending (ожидает подтверждения арендодателя)."""
+    """Создаёт платёж, внесённый вручную (подтверждается через confirm_payment)."""
     payment = Payment(
         lease_id=lease_id,
         amount=amount,
-        period=period,
         payment_date=payment_date,
-        proof_file=proof_file,
-        source=source,
+        source=DataSource.manual,
         status=PaymentStatus.pending,
     )
     session.add(payment)
@@ -99,8 +94,6 @@ async def pay_charge(
     Создаёт подтверждённый платёж и разносит его на это начисление (излишек
     сверх остатка начисления не разносится). Возвращает сводку.
     """
-    from app.domain.allocation import charge_status
-
     payment = Payment(
         lease_id=charge.lease_id,
         amount=amount,
@@ -130,10 +123,3 @@ async def pay_charge(
         "remaining": remaining if remaining > 0 else Decimal("0"),
         "fully_paid": remaining <= 0,
     }
-
-
-async def reject_payment(session: AsyncSession, payment: Payment, rejected_by_id: int | None) -> None:
-    """Отклоняет платёж (деньги не пришли / не подтверждены)."""
-    payment.status = PaymentStatus.rejected
-    payment.confirmed_by_id = rejected_by_id
-    payment.confirmed_at = datetime.now()

@@ -7,7 +7,6 @@ from app.domain.allocation import (
     ChargeOutstanding,
     allocate_payment,
     charge_status,
-    shortfall,
 )
 
 RENT = ChargeOutstanding(charge_id=1, outstanding=Decimal("50000.00"))
@@ -67,9 +66,3 @@ def test_charge_status_overdue():
 
 def test_charge_status_issued_before_due():
     assert charge_status(50000, 0, date(2026, 5, 5), date(2026, 5, 1)) == ChargeStatus.issued
-
-
-def test_shortfall():
-    assert shortfall(51680, 50000) == Decimal("1680.00")
-    assert shortfall(51680, 51680) == Decimal("0.00")
-    assert shortfall(51680, 52000) == Decimal("0.00")

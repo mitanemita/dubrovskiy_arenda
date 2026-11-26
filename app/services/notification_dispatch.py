@@ -1,6 +1,6 @@
 """Работа с очередью уведомлений (aiogram-free, тестируется отдельно).
 
-Фактическая отправка выполняется в bot/notifier.py (Telegram) и email-воркере.
+Фактическая отправка выполняется в bot/notifier.py (Telegram).
 """
 from __future__ import annotations
 
