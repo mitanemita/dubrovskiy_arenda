@@ -373,6 +373,7 @@ class Task(TimestampMixin, Base):
         _enum(enums.TaskPriority, "task_priority"), nullable=False, default=enums.TaskPriority.medium
     )
     due_date: Mapped[date | None] = mapped_column(Date)  # срок (вычисляется из приоритета)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # момент выполнения
     assignee: Mapped[str | None] = mapped_column(String(64))  # кому поставлена (Митя/Алексей/текст; None = общая)
     status: Mapped[enums.TaskStatus] = mapped_column(
         _enum(enums.TaskStatus, "task_status"), nullable=False, default=enums.TaskStatus.open
