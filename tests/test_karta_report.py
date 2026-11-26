@@ -215,6 +215,36 @@ async def test_map_readiness_colors_come_from_premises(session, landlord, readin
     assert summary["issues"] == []
 
 
+async def test_e8_status_follows_database_readiness_and_active_lease(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Е8", litera="Е8")
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    p.readiness = "tech"
+    await session.flush()
+    html, _ = await karta_service.render_html(session, landlord.id)
+    assert _poly(html.decode(), "Е8") == "c-tech"
+
+    p.readiness = "ready"
+    await session.flush()
+    html, _ = await karta_service.render_html(session, landlord.id)
+    assert _poly(html.decode(), "Е8") == "c-free"
+
+    p.readiness = "tech"
+    tenant = await directory_service.create_tenant(
+        session, landlord_id=landlord.id, name="Арендатор Е8", type=OrgType.ooo, inn="7100000001"
+    )
+    await session.flush()
+    await directory_service.create_lease(
+        session, tenant_id=tenant.id, premises_id=p.id, contract_no="Е8-1",
+        contract_date=date(2026, 11, 1), rent_amount=Decimal("10000"),
+    )
+    await session.flush()
+    html, summary = await karta_service.render_html(session, landlord.id)
+    assert _poly(html.decode(), "Е8") == "c-busy"
+    assert "Арендатор Е8" in html.decode()
+    assert summary["rent_total"] == Decimal("10000")
+
+
 async def test_map_uses_database_area_rent_and_rate(session, landlord):
     p = await _lease(session, landlord.id, litera="Д", label="Склад", rent="60000.50", tenant="Арендатор")
     p.area = Decimal("200")

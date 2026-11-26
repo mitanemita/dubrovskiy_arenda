@@ -257,9 +257,10 @@ async def premises_readiness_menu(callback: CallbackQuery, state: FSMContext) ->
             await callback.answer("Помещение не найдено", show_alert=True)
             return
     labels = directory_service.READINESS_LABELS
-    rows = [[InlineKeyboardButton(text=label, callback_data=f"prset:{pid}:{code}")]
+    colors = {"ready": "🟢", "notready": "🟠", "closed": "⚫", "tech": "⚙️", "build": "🔴"}
+    rows = [[InlineKeyboardButton(text=f"{colors[code]} {label}", callback_data=f"prset:{pid}:{code}")]
             for code, label in labels.items()]
-    rows += [[InlineKeyboardButton(text="Не указана", callback_data=f"prset:{pid}:none")],
+    rows += [[InlineKeyboardButton(text="⚪ Не указана", callback_data=f"prset:{pid}:none")],
              [InlineKeyboardButton(text="◀️ К помещению", callback_data=f"ppick:{pid}")]]
     await edit_or_send(callback.message, "Выберите готовность / тип помещения:",
                        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
