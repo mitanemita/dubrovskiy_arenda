@@ -104,6 +104,18 @@ class User(TimestampMixin, Base):
 # --------------------------------------------------------------------------- #
 #  Помещения, арендаторы, договоры
 # --------------------------------------------------------------------------- #
+class PropertySite(TimestampMixin, Base):
+    """Площадка, к которой относятся помещения и отдельный план территории."""
+
+    __tablename__ = "property_sites"
+    __table_args__ = (UniqueConstraint("landlord_id", "name", name="uq_property_site_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    landlord_id: Mapped[int] = mapped_column(ForeignKey("landlords.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    template_key: Mapped[str | None] = mapped_column(String(64))
+
+
 class Premises(TimestampMixin, Base):
     """Помещение (объект аренды)."""
 
@@ -114,6 +126,7 @@ class Premises(TimestampMixin, Base):
     label: Mapped[str] = mapped_column(Text, nullable=False)   # название/№
     # Литера на территории базы (К1, Д, Е6…). Свободный текст: у другой базы — свои литеры.
     litera: Mapped[str | None] = mapped_column(String(32))
+    site_id: Mapped[int | None] = mapped_column(ForeignKey("property_sites.id", ondelete="SET NULL"))
     address: Mapped[str | None] = mapped_column(Text)          # товарный адрес
     area: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))  # м²
     # Занятость объекта, ведётся вручную и не зависит от наличия арендатора/договора.

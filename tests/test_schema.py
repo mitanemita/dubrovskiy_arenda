@@ -4,7 +4,7 @@ from app.db import models
 
 
 EXPECTED_TABLES = {
-    "landlords", "users", "premises", "tenants", "leases",
+    "landlords", "users", "premises", "property_sites", "tenants", "leases",
     "meters", "meter_readings", "charges", "payments", "payment_allocations",
     "expenses", "settings", "documents", "notifications", "adjustments", "tasks",
 }

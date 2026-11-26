@@ -37,6 +37,7 @@ from decimal import ROUND_HALF_UP, Decimal
 #  Справочники
 # --------------------------------------------------------------------------- #
 STATUS_COLOR = {
+    "unknown": "#8a909e",
     "free": "#2eb872",
     "busy": "#3b6fe0",
     "notready": "#e8a020",
@@ -45,6 +46,7 @@ STATUS_COLOR = {
     "build": "#d14b4b",
 }
 STATUS_BADGE = {
+    "unknown": "Нет подтверждённых данных",
     "free": "Свободно, готово к сдаче",
     "busy": "Арендовано",
     "notready": "Не готово к сдаче",
@@ -52,7 +54,7 @@ STATUS_BADGE = {
     "tech": "Техническое",
     "build": "Идёт стройка",
 }
-STICKY = {"closed", "tech", "build"}          # не пересчитываются автоматически
+STICKY = {"closed", "tech", "build", "unknown"}          # не пересчитываются автоматически
 NO_TENANT = {"", "нет", "-", "—", "–", "none", "null", "0"}
 
 TEXT_FIELDS = ("state", "comm", "doors", "purpose", "look", "ready", "tenant")
@@ -219,7 +221,7 @@ def render_info(item: dict, floor: int) -> str:
     tenant = has_tenant(item)
     if item.get("rate") not in (None, ""):
         out.append(_row("rate", "Ставка", _rate_txt(item)))
-    if tenant:
+    if tenant and not item.get("suppress_fact_rate"):
         fr = fact_rate(item)
         out.append(_row("fact_rate", "Фактическая ставка", f"{_num(fr)} ₽/м²" if fr is not None else "—"))
     cost = monthly_cost(item)
