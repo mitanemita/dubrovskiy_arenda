@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Обновление до самой свежей версии и перезапуск (сервер и Mac).
 #
-#   ./deploy.sh                    — все сервисы (на сервере: db, api, bot, n8n)
-#   ./deploy.sh db migrate api bot — только перечисленные (на Mac без n8n)
+#   ./deploy.sh — все сервисы (db, migrate, bot); лишние старые контейнеры (api, n8n) останавливаются
 #
 # Всегда берёт ветку main с GitHub (другую — DEPLOY_BRANCH=имя ./deploy.sh),
 # пересобирает образы с номером версии и проверяет, что запущен именно этот коммит.
@@ -27,6 +26,26 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   die "В папке есть изменённые файлы (выше). Сохраните их или отмените: git stash"
 fi
 
+# Не переключаем текущую рабочую копию или запущенный бот на историю, которая
+# не содержит их изменений: main может отставать от другой рабочей ветки.
+target="origin/$BRANCH"
+git rev-parse --verify "$target^{commit}" >/dev/null 2>&1 || die "Ветка $target не найдена."
+git merge-base --is-ancestor HEAD "$target" \
+  || die "Ветка $target не содержит текущий коммит $(git rev-parse --short HEAD). Проверьте актуальную ветку и объедините изменения перед обновлением."
+
+running_services="$(docker compose ps --status running --services)" \
+  || die "Не удалось проверить запущенные сервисы. Обновление остановлено."
+if printf '%s\n' "$running_services" | grep -qx bot; then
+  running_commit="$(docker compose exec -T bot python -c 'from app.version import build_info; print(build_info()["commit"])' 2>/dev/null | tr -d '\r\n')" \
+    || die "Не удалось определить версию запущенного бота. Обновление остановлено."
+  if [[ ! "$running_commit" =~ ^[0-9a-fA-F]{7,40}$ ]] || \
+     ! git rev-parse --verify "$running_commit^{commit}" >/dev/null 2>&1; then
+    die "Коммит запущенного бота неизвестен в Git ($running_commit). Уточните его версию и найдите исходную ветку перед обновлением."
+  fi
+  git merge-base --is-ancestor "$running_commit" "$target" \
+    || die "Ветка $target не содержит коммит запущенного бота $running_commit. Объедините актуальные изменения перед обновлением."
+fi
+
 current="$(git rev-parse --abbrev-ref HEAD)"
 if [ "$current" != "$BRANCH" ]; then
   say "Переключаюсь с ветки «$current» на «$BRANCH»"
@@ -37,7 +56,7 @@ if [ "$current" != "$BRANCH" ]; then
   fi
 fi
 git merge --ff-only "origin/$BRANCH" \
-  || die "Локальная ветка $BRANCH разошлась с GitHub. Сброс к версии с GitHub: git reset --hard origin/$BRANCH"
+  || die "Локальная ветка $BRANCH разошлась с GitHub. Проверьте историю и сохраните изменения перед обновлением."
 
 GIT_COMMIT="$(git rev-parse --short HEAD)"
 GIT_BRANCH="$BRANCH"

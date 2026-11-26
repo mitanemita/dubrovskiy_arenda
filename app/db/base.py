@@ -1,7 +1,6 @@
 """Базовый класс моделей, асинхронный движок и фабрика сессий."""
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import (
     AsyncAttrs,
@@ -32,9 +31,3 @@ async_session_factory = async_sessionmaker(
     expire_on_commit=False,
     autoflush=False,
 )
-
-
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """Зависимость FastAPI / контекст для получения сессии БД."""
-    async with async_session_factory() as session:
-        yield session

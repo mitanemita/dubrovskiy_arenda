@@ -100,8 +100,8 @@ def _panel_msg(mid: int):
 async def test_map_button_replaces_panel_with_document(bot_env):
     state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=1, user_id=1))
     msg = _panel_msg(10)
-    cb = SimpleNamespace(data="rep:map:202611", message=msg, from_user=SimpleNamespace(id=1), answer=AsyncMock())
-    await ha.report_map(cb, state)
+    cb = SimpleNamespace(data="menu:map", message=msg, from_user=SimpleNamespace(id=1), answer=AsyncMock())
+    await ha.base_map(cb, state)
     msg.answer_document.assert_awaited_once()
     file = msg.answer_document.await_args.args[0]
     assert file.filename.startswith("Karta-") and file.filename.endswith(".html")
@@ -110,8 +110,8 @@ async def test_map_button_replaces_panel_with_document(bot_env):
 
     # «Обновить» — тот же документ, файл заменяется на месте
     doc = _panel_msg(11)
-    cb2 = SimpleNamespace(data="rep:mapre:202611", message=doc, from_user=SimpleNamespace(id=1), answer=AsyncMock())
-    await ha.report_map_refresh(cb2, state)
+    cb2 = SimpleNamespace(data="map:refresh", message=doc, from_user=SimpleNamespace(id=1), answer=AsyncMock())
+    await ha.base_map_refresh(cb2, state)
     doc.edit_media.assert_awaited_once()
     doc.answer_document.assert_not_awaited()
 

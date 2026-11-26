@@ -2,10 +2,12 @@
 from datetime import date
 from decimal import Decimal
 
+import pytest
 import pytest_asyncio
+from sqlalchemy import select
 
 from app.db.enums import ChargeStatus, ChargeType, OrgType, PaymentStatus, TaxMode
-from app.db.models import Landlord, Lease, Meter, MeterReading, Premises, Tenant
+from app.db.models import Charge, Landlord, Lease, Meter, MeterReading, Premises, Tenant
 from app.services import billing_service, payment_service, settings_service
 
 
@@ -121,3 +123,81 @@ async def test_overpayment_leftover(session, lease):
     summary = await payment_service.confirm_payment(session, p, confirmed_by_id=None, today=date(2026, 4, 6))
     assert summary["leftover"] == Decimal("320.00")
     assert summary["fully_paid"] is True
+
+
+async def test_penalty_uses_rate_from_settings(session, lease):
+    """Ставка пени берётся из настроек («Ставка пени, %/день»), а не из договора."""
+    period = date(2026, 4, 1)
+    await billing_service.create_rent_charge(session, lease, period)
+    await session.flush()
+    landlord_id = (await session.get(Tenant, lease.tenant_id)).landlord_id
+    await settings_service.set_setting(session, landlord_id, "penalty_rate", "0.1")
+    await session.flush()
+
+    penalty = await billing_service.upsert_penalty_charge(session, lease, period, today=date(2026, 4, 15))
+    # 50000 * 0.1% * 10 дней = 500.00
+    assert penalty.amount == Decimal("500.00")
+
+
+async def test_electricity_charge_follows_readings(session, lease):
+    """Ввод/исправление показаний создаёт и пересчитывает начисление за любой месяц."""
+    from app.services import reading_service
+
+    meter = (await session.execute(select(Meter))).scalars().one()
+    april, may = date(2026, 4, 1), date(2026, 5, 1)
+    today = date(2026, 6, 20)  # оба месяца уже прошли
+
+    # Начисление за прошедший апрель создаётся по уже введённым показаниям (120 кВт·ч)
+    [apr] = await billing_service.sync_electricity_charges(session, lease.premises_id, april, today)
+    assert apr.amount == Decimal("1680.00")
+
+    # Показания за май: 15350 -> 15450 = 100 кВт·ч
+    await reading_service.upsert_reading(session, meter, period=may, curr_value=Decimal("15450"))
+    await session.flush()
+    [may_charge] = await billing_service.sync_electricity_charges(session, lease.premises_id, may, today)
+    assert may_charge.amount == Decimal("1400.00")
+
+    # Исправили апрель (15340 вместо 15350): апрель 110 кВт·ч, май автоматически 110 кВт·ч
+    await reading_service.upsert_reading(
+        session, meter, period=april, curr_value=Decimal("15340"), prev_value=Decimal("15230")
+    )
+    await session.flush()
+    assert await reading_service.next_reading_period(session, meter.id, april) == may
+    await billing_service.sync_electricity_charges(session, lease.premises_id, april, today)
+    await billing_service.sync_electricity_charges(session, lease.premises_id, may, today)
+    assert apr.amount == Decimal("1540.00")
+    assert may_charge.amount == Decimal("1540.00")
+    # начисление не задвоилось
+    count = (await session.execute(
+        select(Charge).where(Charge.type == ChargeType.electricity)
+    )).scalars().all()
+    assert len(count) == 2
+
+
+async def test_reading_above_next_month_rejected(session, lease):
+    from app.services import reading_service
+
+    meter = (await session.execute(select(Meter))).scalars().one()
+    with pytest.raises(ValueError):
+        await reading_service.upsert_reading(session, meter, period=date(2026, 3, 1), curr_value=Decimal("99999"))
+
+
+async def test_first_reading_is_baseline(session, lease):
+    """Самое раннее показание счётчика — начальное: расход 0, начисления нет."""
+    from app.services import reading_service
+
+    premises = await session.get(Premises, lease.premises_id)
+    meter = Meter(premises_id=premises.id, serial_no="М-2")
+    session.add(meter)
+    await session.flush()
+
+    first = await reading_service.upsert_reading(session, meter, period=date(2026, 7, 1), curr_value=Decimal("5000"))
+    await session.flush()
+    assert first.consumption == Decimal("0.00")
+    assert await billing_service.sync_electricity_charges(session, premises.id, date(2026, 7, 1), date(2026, 7, 2)) == []
+
+    second = await reading_service.upsert_reading(session, meter, period=date(2026, 8, 1), curr_value=Decimal("5100"))
+    await session.flush()
+    assert second.consumption == Decimal("100.00")
+    [charge] = await billing_service.sync_electricity_charges(session, premises.id, date(2026, 8, 1), date(2026, 8, 2))
+    assert charge.amount == Decimal("1400.00")

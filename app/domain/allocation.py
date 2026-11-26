@@ -80,9 +80,3 @@ def charge_status(
     if due_date is not None and today > due_date:
         return ChargeStatus.overdue
     return ChargeStatus.sent if already_sent else ChargeStatus.issued
-
-
-def shortfall(amount: Decimal | int | float, paid_amount: Decimal | int | float) -> Decimal:
-    """Недоплата (сколько ещё должен арендатор). 0, если оплачено полностью/сверх."""
-    diff = money(amount) - money(paid_amount)
-    return diff if diff > 0 else money(0)

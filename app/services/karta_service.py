@@ -102,7 +102,7 @@ async def render_html(session: AsyncSession, landlord_id: int, *, now: datetime 
     return out.encode("utf-8"), summarize(data, not_on_plan, now=now or datetime.now())
 
 
-def caption(summary: dict) -> str:
+def caption(summary: dict, *, link: bool = False) -> str:
     """Подпись к файлу карты (HTML-разметка Telegram, < 1024 символов)."""
     c = summary["counts"]
     rent = f"{int(summary['rent_total']):,}".replace(",", " ")
@@ -116,5 +116,6 @@ def caption(summary: dict) -> str:
         lines.append(f"⚠️ Нет на этом плане: {names}")
     if summary["issues"]:
         lines.append("⚠️ Есть расхождения статусов — см. лог")
-    lines.append("Откройте файл в браузере.")
+    lines.append("Нажмите «🗺 Открыть карту» — карта всегда по актуальным данным."
+                 if link else "Откройте файл в браузере.")
     return "\n".join(lines)

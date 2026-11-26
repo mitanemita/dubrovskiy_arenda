@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Adjustment, Charge, Expense
@@ -77,13 +76,3 @@ async def correct_amount(
         new_value=new_amount,
         reason=reason,
     )
-
-
-async def list_adjustments(session: AsyncSession, landlord_id: int, limit: int = 50) -> list[Adjustment]:
-    result = await session.execute(
-        select(Adjustment)
-        .where(Adjustment.landlord_id == landlord_id)
-        .order_by(Adjustment.created_at.desc())
-        .limit(limit)
-    )
-    return list(result.scalars().all())

@@ -14,8 +14,3 @@ def test_version_line_without_build_env(monkeypatch):
     for k in ("GIT_COMMIT", "GIT_BRANCH", "BUILD_DATE"):
         monkeypatch.delenv(k, raising=False)
     assert "unknown@unknown" in version.version_line()
-
-
-def test_handlers_reexport_ui_version():
-    from app.bot import handlers
-    assert handlers.BOT_UI_VERSION == version.BOT_UI_VERSION

@@ -1,77 +1,66 @@
 """Инлайн-клавиатуры бота.
 
-Вся навигация — на инлайн-кнопках под сообщениями (callback_data). Обычная
-reply-клавиатура не используется: она мешала FSM (ввод текста «залипал»)
-и требовала отдельного роутинга по тексту кнопок.
+Вся навигация — на инлайн-кнопках под сообщениями (callback_data).
 """
 from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-# Префиксы callback_data
-CB_PAY = "pay"      # pay:<payment_id>:<ok|no>
-CB_MENU = "menu"    # menu:<section>
-CB_NAV = "nav"      # nav:home
-
 # Разделы главного меню: callback-ключ -> подпись кнопки
 MENU_SECTIONS: dict[str, str] = {
     "directory": "🗂 Справочники",
+    "finance": "💼 Учёт и финансы",
+    "tasks": "📝 Задачи",
     "settings": "⚙️ Настройки",
+}
+
+# Подразделы «Учёт и финансы»: callback-ключ -> подпись кнопки
+FINANCE_SECTIONS: dict[str, str] = {
     "expense": "💸 Расходы",
     "readings": "🔢 Показания",
-    "tasks": "📝 Задачи",
     "pay": "💰 Отметить оплату",
     "reports": "📊 Отчёты",
+    "map": "🗺 Карта базы",
 }
+
+
+def _menu_kb(sections: dict[str, str]) -> list[list[InlineKeyboardButton]]:
+    """Кнопки разделов по две в ряд."""
+    items = [
+        InlineKeyboardButton(text=title, callback_data=f"menu:{key}")
+        for key, title in sections.items()
+    ]
+    return [items[i : i + 2] for i in range(0, len(items), 2)]
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
     """Главное меню на инлайн-кнопках (по две в ряд)."""
-    items = [
-        InlineKeyboardButton(text=title, callback_data=f"{CB_MENU}:{key}")
-        for key, title in MENU_SECTIONS.items()
-    ]
-    rows = [items[i : i + 2] for i in range(0, len(items), 2)]
+    return InlineKeyboardMarkup(inline_keyboard=_menu_kb(MENU_SECTIONS))
+
+
+def finance_menu_kb() -> InlineKeyboardMarkup:
+    """Меню раздела «Учёт и финансы»."""
+    rows = _menu_kb(FINANCE_SECTIONS)
+    rows.append([InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def back_kb() -> InlineKeyboardMarkup:
     """Одна кнопка «В меню»."""
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="◀️ В меню", callback_data=f"{CB_NAV}:home")]]
+        inline_keyboard=[[InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")]]
+    )
+
+
+def finance_back_kb() -> InlineKeyboardMarkup:
+    """Одна кнопка возврата в «Учёт и финансы»."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="◀️ Учёт и финансы", callback_data="menu:finance")]]
     )
 
 
 def cancel_kb() -> InlineKeyboardMarkup:
     """Одна кнопка «Отмена» (прерывает ввод и возвращает в меню)."""
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="✖️ Отмена", callback_data=f"{CB_NAV}:home")]]
-    )
-
-
-def task_reminder_kb(task_id: int) -> InlineKeyboardMarkup:
-    """Кнопки в напоминании по задаче: выполнить / сменить категорию / перенести на дату.
-
-    Те же callback'и, что и в карточке задачи: хендлер сам отличает напоминание от
-    карточки по тексту сообщения и после действия удаляет именно напоминание, чтобы
-    не копить их в чате.
-    """
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Выполнено", callback_data=f"taskdone:{task_id}"),
-            InlineKeyboardButton(text="🏷 Категория", callback_data=f"taskcat:{task_id}"),
-            InlineKeyboardButton(text="📅 Дата", callback_data=f"taskdate:{task_id}"),
-        ]]
-    )
-
-
-def payment_decision_kb(payment_id: int) -> InlineKeyboardMarkup:
-    """Кнопки подтверждения/отклонения платежа."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"{CB_PAY}:{payment_id}:ok"),
-                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"{CB_PAY}:{payment_id}:no"),
-            ]
-        ]
+        inline_keyboard=[[InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")]]
     )

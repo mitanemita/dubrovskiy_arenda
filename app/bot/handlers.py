@@ -1,111 +1,28 @@
-"""Хендлеры Telegram-бота: старт и решение по платежу."""
+"""Хендлеры Telegram-бота: вход (/start, /version).
+
+Доступ проверяет AccessMiddleware (app/bot/access.py) — до любого хендлера.
+"""
 from __future__ import annotations
 
-from datetime import date
-
-from aiogram import F, Router
-from aiogram.filters import Command, StateFilter
+from aiogram import Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
-from sqlalchemy import select
+from aiogram.types import Message
 
 from app.bot.handlers_admin import show_main_menu
-from app.bot.keyboards import CB_PAY, MENU_SECTIONS
-from app.config import get_settings
-from app.db.base import async_session_factory
-from app.db.models import Payment, User
-from app.services import confirmation_service
-from app.utils.logger import logger
-# Версия — в app/version.py (метка UI + коммит/ветка/время сборки).
-# BOT_UI_VERSION реэкспортируется для старых команд проверки.
-from app.version import BOT_UI_VERSION, version_line  # noqa: F401
+from app.version import version_line
 
 router = Router()
-
-
-
-async def _is_allowed(session, tg_id: int) -> bool:
-    """Доступ разрешён администраторам из настроек или активным пользователям в БД."""
-    if tg_id in get_settings().admin_ids:
-        return True
-    result = await session.execute(
-        select(User.id).where(User.tg_id == tg_id, User.is_active.is_(True))
-    )
-    return result.scalar_one_or_none() is not None
 
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
-    async with async_session_factory() as session:
-        allowed = await _is_allowed(session, message.from_user.id)
-    if not allowed:
-        await message.answer("⛔ Доступ запрещён. Обратитесь к администратору.", reply_markup=ReplyKeyboardRemove())
-        return
-    # Убираем старую reply-клавиатуру (она «залипает» в чате Telegram),
-    # затем показываем инлайн-меню.
-    await message.answer(f"👋 Бот учёта аренды.\n<code>{version_line()}</code>", reply_markup=ReplyKeyboardRemove())
+    await message.answer(f"👋 Бот учёта аренды.\n<code>{version_line()}</code>")
     await show_main_menu(message)
 
 
 @router.message(Command("version"))
 async def cmd_version(message: Message) -> None:
-    """Показывает версию UI бота — чтобы проверить, что запущена новая сборка."""
-    await message.answer(f"Версия: <code>{version_line()}</code>", reply_markup=ReplyKeyboardRemove())
-
-
-@router.message(StateFilter(None), F.text.in_(set(MENU_SECTIONS.values())))
-async def legacy_reply_button(message: Message, state: FSMContext) -> None:
-    """Совместимость: нажата кнопка старой reply-клавиатуры (вне активного ввода).
-
-    Убираем залипшую клавиатуру и открываем актуальное инлайн-меню.
-    """
-    await message.answer("Меню теперь под сообщением 👇", reply_markup=ReplyKeyboardRemove())
-    await show_main_menu(message)
-
-
-@router.callback_query(F.data.startswith(f"{CB_PAY}:"))
-async def on_payment_decision(callback: CallbackQuery) -> None:
-    """Обработка кнопок Подтвердить/Отклонить под платежом."""
-    _, raw_id, action = callback.data.split(":")
-    payment_id = int(raw_id)
-    approve = action == "ok"
-
-    async with async_session_factory() as session:
-        if not await _is_allowed(session, callback.from_user.id):
-            await callback.answer("Доступ запрещён", show_alert=True)
-            return
-
-        payment = await session.get(Payment, payment_id)
-        if payment is None:
-            await callback.answer("Платёж не найден", show_alert=True)
-            return
-
-        user = (
-            await session.execute(select(User).where(User.tg_id == callback.from_user.id))
-        ).scalar_one_or_none()
-
-        try:
-            result = await confirmation_service.process_payment_decision(
-                session, payment, approve=approve, user_id=user.id if user else None, today=date.today()
-            )
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            logger.exception("Ошибка обработки решения по платежу %s", payment_id)
-            await callback.answer("Ошибка обработки", show_alert=True)
-            return
-
-    if approve:
-        note = "оплата закрыта полностью" if result.get("fully_paid") else (
-            f"частично, остаток {result.get('remaining_debt')} ₽"
-        )
-        text = f"✅ Платёж подтверждён ({note})."
-    else:
-        text = "❌ Платёж отклонён."
-
-    try:
-        await callback.message.edit_text(text)
-    except Exception:
-        await callback.message.answer(text)
-    await callback.answer()
+    """Показывает версию бота — чтобы проверить, что запущена новая сборка."""
+    await message.answer(f"Версия: <code>{version_line()}</code>")
