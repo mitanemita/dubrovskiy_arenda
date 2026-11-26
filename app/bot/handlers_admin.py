@@ -697,6 +697,7 @@ def _task_card_kb(t, back_cb: str = "tasks:edit") -> InlineKeyboardMarkup:
 
 
 @router.callback_query(F.data == "menu:tasks")
+@router.callback_query(F.data.startswith("tasks:refresh:"))
 async def tasks_menu(callback: CallbackQuery, state: FSMContext) -> None:
     """Открывает список и помечает уведомления этого арендодателя прочитанными."""
     await state.clear()
@@ -705,7 +706,10 @@ async def tasks_menu(callback: CallbackQuery, state: FSMContext) -> None:
         if lid:
             await task_service.mark_all_task_notifications_read(session, lid)
             await session.commit()
-    await tasks_edit_list(callback, state)
+    refresh = callback.data.startswith("tasks:refresh:")
+    offset = int(callback.data.split(":")[2]) if refresh else 0
+    await _render_tasks_list(callback.message, callback.from_user.id, offset)
+    await callback.answer("Обновлено" if refresh else None)
 
 
 # --- Входящие уведомления по задачам ---------------------------------------
@@ -829,7 +833,8 @@ async def _render_tasks_list(message: Message, tg_id: int, offset: int = 0, *, w
     rows.extend([
         [InlineKeyboardButton(text="➕ Задача", callback_data="task_add"),
          InlineKeyboardButton(text="➕ Списком", callback_data="task_bulk")],
-        [InlineKeyboardButton(text="✅ Выполненные", callback_data="tasks:done")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"tasks:refresh:{offset}"),
+         InlineKeyboardButton(text="✅ Выполненные", callback_data="tasks:done")],
         [InlineKeyboardButton(text="◀️ В меню", callback_data="nav:home")],
     ])
     reply = wiz_reply if wizard else edit_or_send

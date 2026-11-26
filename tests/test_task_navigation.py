@@ -72,12 +72,25 @@ async def test_open_tasks_marks_only_own_notifications_and_displays_paginated_li
     assert len(text) < ui._TG_MAX_LEN
     assert "Стр. 1/2" in text and "&lt;&amp;" in text
     assert len([value for value in buttons(markup) if value.startswith("tpick:")]) == 20
-    assert {"task_add", "task_bulk", "tasks:done", "tasks:editp:20"} <= set(buttons(markup))
+    assert {"task_add", "task_bulk", "tasks:done", "tasks:editp:20", "tasks:refresh:0"} <= set(buttons(markup))
     assert not {"tasks:recent", "tasks:edit", "tasks:notif"} & set(buttons(markup))
     cb.answer.assert_awaited_once()
     await ui.tasks_edit_list(callback("tasks:editp:20"), State())
     assert "Стр. 2/2" in rendered[-1][0]
     assert len([value for value in buttons(rendered[-1][1]) if value.startswith("tpick:")]) == 1
+    assert "tasks:refresh:20" in buttons(rendered[-1][1])
+
+    new_task = await task_service.create_task(session, landlord_id=landlord.id, title="Новая на странице")
+    new_notif = await notification_service.enqueue(session, landlord_id=landlord.id, channel=NotifChannel.telegram,
+                                                    type="task_reminder", subject="Срок", body="Задача")
+    await session.flush()
+    refresh = callback("tasks:refresh:20")
+    await ui.tasks_menu(refresh, State())
+    assert "Стр. 2/2" in rendered[-1][0]
+    assert f"tpick:{new_task.id}" in buttons(rendered[-1][1])
+    assert new_notif.status == NotifStatus.sent
+    assert other_notif.status == NotifStatus.queued
+    refresh.answer.assert_awaited_once_with("Обновлено")
 
 
 async def test_text_edit_from_card_saves_and_returns_to_card(session, bot_db, monkeypatch):
