@@ -329,3 +329,12 @@ async def test_update_premises_litera_field(session, landlord):
     assert p.litera == "Е6"
     await directory_service.update_premises_field(session, p.id, "litera", "")
     assert p.litera is None
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "inf", "1.234", "10000000000"])
+async def test_expected_rate_rejects_invalid_values(session, landlord, value):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад")
+    await session.flush()
+    with pytest.raises(ValueError):
+        await directory_service.update_premises_field(session, p.id, "asking_rate", value)
+    assert p.asking_rate is None

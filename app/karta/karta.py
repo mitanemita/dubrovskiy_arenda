@@ -37,7 +37,7 @@ from decimal import ROUND_HALF_UP, Decimal
 #  Справочники
 # --------------------------------------------------------------------------- #
 STATUS_COLOR = {
-    "unknown": "#8a909e",
+    "unknown": "#ffffff",
     "free": "#2eb872",
     "busy": "#3b6fe0",
     "notready": "#e8a020",
@@ -122,15 +122,18 @@ def rooms_count(item: dict):
 
 
 def monthly_cost(item: dict) -> Decimal | None:
-    a, r = total_area(item), _dec(item.get("rate"))
+    a = _dec(item.get("db_area")) if "db_area" in item else total_area(item)
+    r = _dec(item.get("rate"))
     return None if a is None or r is None else a * r
 
 
 def fact_rate(item: dict) -> Decimal | None:
-    a, f = total_area(item), _dec(item.get("rent_fact"))
-    if a is None or f is None or a == 0:
+    a = _dec(item.get("fact_area")) if "fact_area" in item else total_area(item)
+    f = _dec(item.get("rent_fact"))
+    if a is None or f is None or a <= 0:
         return None
-    return (f / a).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    precision = Decimal("0.01") if "fact_area" in item else Decimal("0.1")
+    return (f / a).quantize(precision, rounding=ROUND_HALF_UP)
 
 
 def compute_status(item: dict) -> str:
@@ -176,7 +179,7 @@ def _row(f: str, label: str, value) -> str:
 
 def _rate_txt(item) -> str:
     r = _dec(item.get("rate"))
-    return f"{_num(r)} ₽/м²" if r is not None else str(item.get("rate"))
+    return f"{_num(r, 2) if 'db_area' in item else _num(r)} ₽/м²" if r is not None else str(item.get("rate"))
 
 
 def render_info(item: dict, floor: int) -> str:
@@ -185,10 +188,11 @@ def render_info(item: dict, floor: int) -> str:
     cls, pref = ("a1", "i") if floor == 1 else ("a2", "j")
     is_tech = item.get("kind") == "tech"
     title = "Техническое помещение" if is_tech else f"Литера {_e(lit)}" + (" · 2 этаж" if floor == 2 else "")
+    badge_color = ";color:#222;border:1px solid #888" if st == "unknown" else ""
     out = [f'<div class="info {cls}" id="{pref}-{lit}" data-lit="{lit}" data-status="{st}">',
            f"<h2>{title}</h2>",
-           f'<span class="badge" style="background:{STATUS_COLOR[st]}">{_e(badge_text(item, st))}</span>']
-    described = any(item.get(k) not in (None, "", []) for k in DESCR_FIELDS)
+           f'<span class="badge" style="background:{STATUS_COLOR[st]}{badge_color}">{_e(badge_text(item, st))}</span>']
+    described = "db_area" in item or any(item.get(k) not in (None, "", []) for k in DESCR_FIELDS)
     hint = item.get("hint") or ("Помещение без литеры." if is_tech else None)
     if hint and not described:
         out.append(f'<p class="hint">{_e(hint)}</p>')
@@ -201,7 +205,10 @@ def render_info(item: dict, floor: int) -> str:
     if rc is not None:
         out.append(_row("rooms_count", "Помещений", rc))
     if area is not None:
-        out.append(_row("area", "Общая площадь", f"{_num(area)} м²"))
+        out.append(_row("area", "Площадь по плану" if "db_area" in item else "Общая площадь", f"{_num(area)} м²"))
+    if "db_area" in item:
+        db_area = _dec(item.get("db_area"))
+        out.append(_row("db_area", "Площадь по учёту", f"{_num(db_area, 2)} м²" if db_area is not None else "не указана"))
     rooms = item.get("rooms") or []
     if rooms:
         lis = []
@@ -220,19 +227,23 @@ def render_info(item: dict, floor: int) -> str:
             out.append(_row(f, ROW_LABEL[f], item[f]))
     tenant = has_tenant(item)
     if item.get("rate") not in (None, ""):
-        out.append(_row("rate", "Ставка", _rate_txt(item)))
+        out.append(_row("rate", "Предполагаемая ставка" if "db_area" in item else "Ставка", _rate_txt(item)))
+    elif "db_area" in item:
+        out.append(_row("rate", "Предполагаемая ставка", item.get("rate_note", "не указана")))
     if tenant and not item.get("suppress_fact_rate"):
         fr = fact_rate(item)
-        out.append(_row("fact_rate", "Фактическая ставка", f"{_num(fr)} ₽/м²" if fr is not None else "—"))
+        out.append(_row("fact_rate", "Фактическая ставка", f"{_num(fr, 2) if 'fact_area' in item else _num(fr)} ₽/м²" if fr is not None else ("не рассчитана" if "fact_area" in item else "—")))
     cost = monthly_cost(item)
     if cost is not None:
-        out.append(_row("cost", "Стоимость в месяц", f"{_num(cost, 0)} ₽"))
+        out.append(_row("cost", "Стоимость в месяц", f"{_num(cost, 2 if 'db_area' in item else 0)} ₽"))
     if tenant:
         rf = _dec(item.get("rent_fact"))
-        out.append(_row("rent_fact", "Фактическая рента", f"{_num(rf, 0)} ₽" if rf is not None else "—"))
+        out.append(_row("rent_fact", "Фактическая рента", f"{_num(rf, 2)} ₽" if rf is not None else "—"))
     for f in ("ready", "tenant"):
         if item.get(f) not in (None, ""):
             out.append(_row(f, ROW_LABEL[f], item[f]))
+        elif f == "tenant" and "db_area" in item:
+            out.append(_row("tenant", "Арендатор", "нет подтверждённого арендатора"))
     out.append("</div>")
     return "".join(out)
 

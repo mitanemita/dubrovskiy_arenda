@@ -60,11 +60,25 @@ async def _krasnodar_by_litera(session: AsyncSession, landlord_id: int) -> dict[
     for p in premises:
         if not p.litera:
             continue
-        r = result.setdefault(_key(p.litera), {"litera": p.litera, "tenants": [],
-                                              "rent": Decimal(0), "uncertain": False})
+        r = result.setdefault(_key(p.litera), {
+            "litera": p.litera, "tenants": [], "rent": Decimal(0), "uncertain": False,
+            "rates": [], "readiness": [], "total_area": Decimal(0), "area_known": True,
+            "rent_area": Decimal(0), "rent_area_known": True,
+        })
         leases = by_premises.get(p.id, [])
+        r["readiness"].append(p.readiness)
+        r["rates"].append(p.asking_rate)
+        if p.area is None or p.area <= 0:
+            r["area_known"] = False
+        else:
+            r["total_area"] += p.area
         if p.is_occupied and not leases:
             r["uncertain"] = True
+        if leases:
+            if p.area is None or p.area <= 0 or len(leases) != 1:
+                r["rent_area_known"] = False
+            else:
+                r["rent_area"] += p.area
         for tenant, rent in leases:
             if tenant not in r["tenants"]:
                 r["tenants"].append(tenant)
@@ -78,24 +92,53 @@ async def build_data(session: AsyncSession, landlord_id: int) -> tuple[list[dict
     data = copy.deepcopy(base)
     assigned = await _krasnodar_by_litera(session, landlord_id)
     on_plan = set()
+    readiness_labels = {
+        "ready": "Готово к сдаче", "notready": "Не готово к сдаче",
+        "closed": "Не сдаётся", "tech": "Техническое", "build": "Стройка",
+    }
+    statuses = {"ready": "free", "notready": "notready", "closed": "closed",
+                "tech": "tech", "build": "build"}
     for item in data:
         k = _key(item["id"])
         on_plan.add(k)
-        # Шаблон содержит исторические имена и суммы, которые нельзя выдавать за данные БД.
-        item.pop("tenant", None)
-        item.pop("rent_fact", None)
-        item.pop("rate", None)  # Ставка из старого шаблона не является данными БД.
-        item["suppress_fact_rate"] = True  # Площадь на плане может отличаться от данных БД.
-        if item.get("kind") == "tech":
-            continue
         info = assigned.get(k)
-        if not info or info["uncertain"]:
+        # Описания и цены из шаблона не являются текущими данными учёта.
+        for field in ("tenant", "rent_fact", "rate", "ready", "kind", "badge"):
+            item.pop(field, None)
+        item["db_area"] = None
+        item["fact_area"] = None
+        item["ready"] = "Не указана"
+        if not info:
             karta.update(data, item["id"], status="unknown")
-        elif info["tenants"]:
-            karta.update(data, item["id"], status="auto", tenant=", ".join(info["tenants"]),
-                         rent_fact=str(info["rent"]))
+            continue
+        if info["area_known"]:
+            item["db_area"] = str(info["total_area"])
+        if info["tenants"] and info["rent_area_known"] and not info["uncertain"]:
+            item["fact_area"] = str(info["rent_area"])
+        rates = set(info["rates"])
+        if len(rates) == 1 and None not in rates:
+            item["rate"] = str(next(iter(rates)))
+        elif len(rates) > 1:
+            item["rate_note"] = "разные или не указаны"
+        readiness = set(info["readiness"])
+        if len(readiness) == 1:
+            value = next(iter(readiness))
+            if value in readiness_labels:
+                item["ready"] = readiness_labels[value]
         else:
-            karta.update(data, item["id"], status="auto", tenant=None, rent_fact=None)
+            value = None
+        if info["uncertain"]:
+            status = "unknown"
+        elif info["tenants"]:
+            status = "busy"
+        else:
+            status = statuses.get(value, "unknown")
+        if status == "tech":
+            item["kind"] = "tech"
+        fields = {"status": status}
+        if info["tenants"]:
+            fields.update(tenant=", ".join(info["tenants"]), rent_fact=str(info["rent"]))
+        karta.update(data, item["id"], **fields)
     not_on_plan = sorted(v["litera"] for k, v in assigned.items() if k not in on_plan)
     return data, not_on_plan
 
@@ -109,11 +152,10 @@ async def unassigned_count(session: AsyncSession, landlord_id: int) -> int:
 
 
 def summarize(data: list[dict], not_on_plan: list[str], *, now: datetime) -> dict:
-    counts = {"busy": 0, "free": 0, "notready": 0, "unknown": 0, "other": 0}
+    counts = {"busy": 0, "free": 0, "notready": 0, "closed": 0, "tech": 0,
+              "build": 0, "unknown": 0, "other": 0}
     rent_total, no_rent = Decimal(0), 0
     for item in data:
-        if item.get("kind") == "tech":
-            continue
         st = karta.compute_status(item)
         counts[st if st in counts else "other"] += 1
         if st == "busy":
@@ -133,17 +175,22 @@ async def render_html(session: AsyncSession, landlord_id: int, *, now: datetime 
     summary = summarize(data, not_on_plan, now=now or datetime.now())
     summary["unassigned"] = await unassigned_count(session, landlord_id)
     out = karta.apply(html, data)
-    out = out.replace("</head>", "<style>.c-unknown{fill:#8a909e;stroke:#8a909e}</style></head>", 1)
+    out = out.replace("</head>", "<style>.c-unknown{fill:#fff;stroke:#555;stroke-dasharray:20,12}</style></head>", 1)
+    out = out.replace('<span><i style="background:#d14b4b"></i>Стройка</span>',
+                      '<span><i style="background:#d14b4b"></i>Стройка</span>'
+                      '<span><i style="background:#fff;border:1px dashed #555"></i>Нет данных</span>', 1)
     return out.encode("utf-8"), summary
 
 
 def caption(summary: dict, *, link: bool = False) -> str:
     """Подпись к файлу карты (HTML-разметка Telegram, < 1024 символов)."""
     c = summary["counts"]
-    rent = f"{int(summary['rent_total']):,}".replace(",", " ")
+    total = summary["rent_total"].quantize(Decimal("0.01"))
+    rent = (f"{total:,.2f}" if total % 1 else f"{total:,.0f}").replace(",", " ").replace(".", ",")
     lines = [
         f"<b>🗺 Краснодар на {summary['now']:%d.%m.%Y %H:%M}</b>",
         f"🔵 Арендовано {c['busy']} · 🟢 свободно {c['free']} · 🟠 не готово {c['notready']}",
+        f"⚫ Не сдаётся {c.get('closed', 0)} · ⚙️ техническое {c.get('tech', 0)} · 🔴 стройка {c.get('build', 0)}",
         f"⚪ Нет подтверждённых данных: {c.get('unknown', 0)}",
         f"💰 Фактическая рента: {rent} ₽" + (f" (нет суммы у {summary['no_rent']})" if summary["no_rent"] else ""),
     ]

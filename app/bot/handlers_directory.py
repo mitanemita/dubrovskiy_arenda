@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from html import escape
 
 from aiogram import F, Router
@@ -29,7 +29,7 @@ from app.bot.handlers_admin import (
     wiz_reply,
 )
 from app.db.base import async_session_factory
-from app.db.enums import OrgType
+from app.db.enums import LeaseStatus, OrgType
 from app.db.models import Lease, Premises, PropertySite, Tenant
 from app.bot.keyboards import back_kb, cancel_kb, main_menu_kb
 from app.services import directory_service
@@ -202,6 +202,9 @@ async def _render_premises_card(message, pid: int) -> bool:
         p = await session.get(Premises, pid)
         occ = await directory_service.active_occupants(session, p.landlord_id) if p else {}
         site = await session.get(PropertySite, p.site_id) if p and p.site_id else None
+        active_leases = (await session.execute(select(Lease).where(
+            Lease.premises_id == pid, Lease.status == LeaseStatus.active
+        ))).scalars().all() if p else []
     if p is None:
         return False
     area = f", {p.area} м²" if p.area is not None else ""
@@ -209,14 +212,24 @@ async def _render_premises_card(message, pid: int) -> bool:
         f"<b>Помещение</b>\n{p.label}{area}\n"
         f"Литера: {p.litera or '— не указана'}\n"
         f"Площадка: {escape(site.name) if site else '— не указана'}\n"
-        f"Статус: {_status_label(p.is_occupied)}"
+        f"Готовность: {directory_service.READINESS_LABELS.get(p.readiness, 'не указана')}\n"
+        f"Предполагаемая ставка: {p.asking_rate if p.asking_rate is not None else 'не указана'}"
+        f"{' ₽/м²' if p.asking_rate is not None else ''}\n"
+        f"Статус: {_status_label(bool(active_leases) or p.is_occupied)}"
     )
-    if p.is_occupied and occ.get(p.id):
-        text += "\nЗанимает: " + ", ".join(occ[p.id])
+    if active_leases:
+        text += "\nАрендатор: " + escape(", ".join(occ.get(p.id, [])))
+        rent = sum((lease.rent_amount for lease in active_leases), Decimal(0))
+        text += f"\nФактическая рента: {rent} ₽/мес"
+        if p.area and len(active_leases) == 1:
+            text += f"\nФактическая ставка: {(rent / p.area).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)} ₽/м²"
+        else:
+            text += "\nФактическая ставка: не рассчитана"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"pedit:{p.id}"),
          InlineKeyboardButton(text="🗑 Удалить", callback_data=f"pdel:{p.id}")],
-        [InlineKeyboardButton(text="🗺 Площадка", callback_data=f"psite:{p.id}")],
+        [InlineKeyboardButton(text="🗺 Площадка", callback_data=f"psite:{p.id}"),
+         InlineKeyboardButton(text="🏷 Готовность", callback_data=f"pread:{p.id}")],
         [InlineKeyboardButton(text="◀️ К помещениям", callback_data="dir:premises")],
     ])
     await wiz_reply(message, text, reply_markup=kb)
@@ -231,6 +244,46 @@ async def premises_card(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Помещение не найдено", show_alert=True)
         return
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pread:"))
+async def premises_readiness_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    pid = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        p = await session.get(Premises, pid)
+        if p is None or p.landlord_id != lid:
+            await callback.answer("Помещение не найдено", show_alert=True)
+            return
+    labels = directory_service.READINESS_LABELS
+    rows = [[InlineKeyboardButton(text=label, callback_data=f"prset:{pid}:{code}")]
+            for code, label in labels.items()]
+    rows += [[InlineKeyboardButton(text="Не указана", callback_data=f"prset:{pid}:none")],
+             [InlineKeyboardButton(text="◀️ К помещению", callback_data=f"ppick:{pid}")]]
+    await edit_or_send(callback.message, "Выберите готовность / тип помещения:",
+                       reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("prset:"))
+async def premises_set_readiness(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    _, raw_pid, code = callback.data.split(":")
+    pid = int(raw_pid)
+    if code != "none" and code not in directory_service.READINESS_LABELS:
+        await callback.answer("Неизвестное значение", show_alert=True)
+        return
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        p = await session.get(Premises, pid)
+        if p is None or p.landlord_id != lid:
+            await callback.answer("Помещение не найдено", show_alert=True)
+            return
+        p.readiness = None if code == "none" else code
+        await session.commit()
+    await _render_premises_card(callback.message, pid)
+    await callback.answer("Готовность сохранена")
 
 
 @router.callback_query(F.data.startswith("psite:"))
