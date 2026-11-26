@@ -122,7 +122,8 @@ async def build_data(session: AsyncSession, landlord_id: int) -> tuple[list[dict
             item["rate"] = str(next(iter(rates)))
         elif len(rates) > 1:
             item["rate_note"] = "разные или не указаны"
-        readiness = set(info["readiness"])
+        # Для ранее созданных помещений без заданной готовности свободно — значение по умолчанию.
+        readiness = {r if r is not None else "ready" for r in info["readiness"]}
         if len(readiness) == 1:
             value = next(iter(readiness))
             if value in readiness_labels:

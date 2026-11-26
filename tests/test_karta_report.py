@@ -225,7 +225,7 @@ async def test_map_is_rebuilt_when_location_changes(session, landlord):
     ("closed", "c-closed"),
     ("tech", "c-tech"),
     ("build", "c-build"),
-    (None, "c-unknown"),
+    (None, "c-free"),
 ])
 async def test_map_readiness_colors_come_from_premises(session, landlord, readiness, expected):
     p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад", litera="Д")
@@ -239,6 +239,15 @@ async def test_map_readiness_colors_come_from_premises(session, landlord, readin
     assert _poly(text, "2Д") == expected
     assert "Нет данных</span>" in text
     assert summary["issues"] == []
+
+
+async def test_new_premises_is_free_by_default_on_map(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Г3", litera="Г3")
+    await session.flush()
+    assert p.readiness == "ready" and not p.is_occupied
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    html, _ = await karta_service.render_html(session, landlord.id)
+    assert _poly(html.decode(), "Г3") == "c-free"
 
 
 async def test_e8_status_follows_database_readiness_and_active_lease(session, landlord):

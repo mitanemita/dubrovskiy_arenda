@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -133,3 +134,42 @@ async def test_premises_readiness_selected_from_buttons(factory):
     async with f() as s:
         assert (await s.get(Premises, pid)).readiness == "build"
     assert "Стройка" in screens[-1]
+
+
+async def test_all_premises_shows_readiness_and_active_contract_without_changing_filters(factory):
+    f, screens = factory
+    async with f() as s:
+        original = (await s.execute(select(Premises))).scalar_one()
+        tenant = (await s.execute(select(Tenant))).scalar_one()
+        original.readiness = "tech"
+        rented = Premises(landlord_id=original.landlord_id, label="По договору", readiness="closed", is_occupied=False)
+        s.add_all([
+            rented,
+            Premises(landlord_id=original.landlord_id, label="Без готовности", is_occupied=False),
+            Premises(landlord_id=original.landlord_id, label="Не готово", readiness="notready", is_occupied=False),
+            Premises(landlord_id=original.landlord_id, label="Закрыто", readiness="closed", is_occupied=False),
+            Premises(landlord_id=original.landlord_id, label="Строится", readiness="build", is_occupied=False),
+            Premises(landlord_id=original.landlord_id, label="Вручную занято", is_occupied=True),
+        ])
+        await s.flush()
+        s.add(Lease(tenant_id=tenant.id, premises_id=rented.id, contract_no="1",
+                    contract_date=date(2026, 1, 1), rent_amount=Decimal("1000")))
+        await s.commit()
+
+    state = _state()
+    await hd.premises_list(_cb("premlist:all:0"), state)
+    text = screens[-1]
+    assert "Склад у ворот · ⚙️ техническое" in text
+    assert "По договору · 🔵 арендовано · ООО Ромашка" in text
+    assert "Без готовности · 🟢 свободно" in text
+    assert "Не готово · 🟠 не готово" in text
+    assert "Закрыто · ⚫ не сдаётся" in text
+    assert "Строится · 🔴 стройка" in text
+    assert "Вручную занято · ⚪ занятость не подтверждена" in text
+
+    await hd.premises_list(_cb("premlist:free:0"), state)
+    assert "По договору" not in screens[-1]
+    assert "Вручную занято" not in screens[-1]
+    await hd.premises_list(_cb("premlist:occ:0"), state)
+    assert "Вручную занято" in screens[-1]
+    assert "По договору" in screens[-1]
