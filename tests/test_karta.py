@@ -88,3 +88,14 @@ def test_color_rule_table():
     for fields, expected in cases:
         karta.update(data, "Р2", **fields)
         assert _poly(karta.apply(HTML, data), "Р2") == expected, fields
+
+
+def test_all_colored_polygons_are_supported_by_renderer():
+    """Каждый окрашиваемый контур имеет запись, включая контуры второго этажа."""
+    colored = re.findall(r'<polygon\b[^>]*class="c-[a-z]+"[^>]*>', HTML)
+    matched = list(karta.POLY_RE.finditer(HTML))
+    assert len(matched) == len(colored) == 48
+    data = karta.load(HTML)
+    keys = {it["id"] if floor == 1 else f"2{it['id']}"
+            for it in data for floor in it.get("floors", [1])}
+    assert all(match.group(2) in keys for match in matched)

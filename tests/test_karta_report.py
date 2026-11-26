@@ -7,6 +7,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 import pytest_asyncio
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
@@ -35,6 +36,7 @@ async def _lease(session, lid, *, litera, label, rent, tenant="ООО Ромаш
         contract_date=date(2026, 11, 1), rent_amount=Decimal(rent),
     )
     await session.flush()
+    return p
 
 
 @pytest_asyncio.fixture
@@ -189,3 +191,60 @@ async def test_map_is_rebuilt_when_location_changes(session, landlord):
     assert _poly(after.decode(), "Д") == "c-unknown"
     assert "Текущий" not in after.decode()
     assert summary["rent_total"] == 0
+
+
+@pytest.mark.parametrize("readiness,expected", [
+    ("ready", "c-free"),
+    ("notready", "c-notready"),
+    ("closed", "c-closed"),
+    ("tech", "c-tech"),
+    ("build", "c-build"),
+    (None, "c-unknown"),
+])
+async def test_map_readiness_colors_come_from_premises(session, landlord, readiness, expected):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Склад", litera="Д")
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    p.readiness = readiness
+    await session.flush()
+    html, summary = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    assert _poly(text, "Д") == expected
+    assert _poly(text, "2Д") == expected
+    assert "Нет данных</span>" in text
+    assert summary["issues"] == []
+
+
+async def test_map_uses_database_area_rent_and_rate(session, landlord):
+    p = await _lease(session, landlord.id, litera="Д", label="Склад", rent="60000.50", tenant="Арендатор")
+    p.area = Decimal("200")
+    p.readiness = "notready"
+    await directory_service.update_premises_field(session, p.id, "asking_rate", "300,25")
+    await session.flush()
+    html, summary = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    assert _poly(text, "Д") == "c-busy"  # действующий арендатор определяет занятость
+    assert "Арендатор" in text and "60000,5 ₽" in text
+    assert re.search(r'data-f="rate"><span>Предполагаемая ставка</span><span>300,25 ₽/м²</span>', text)
+    assert re.search(r'data-f="fact_rate"><span>Фактическая ставка</span><span>300 ₽/м²</span>', text)
+    assert "Не готово к сдаче" in text
+    assert summary["rent_total"] == Decimal("60000.50")
+    assert "60 000,50 ₽" in karta_service.caption(summary)
+
+
+async def test_missing_or_ambiguous_area_does_not_invent_fact_rate(session, landlord):
+    from app.db.models import Tenant
+
+    p = await _lease(session, landlord.id, litera="Д", label="Склад", rent="100000", tenant="Первый")
+    html, _ = await karta_service.render_html(session, landlord.id)
+    assert "не рассчитана" in html.decode()
+    p.area = Decimal("200")
+    t = await directory_service.create_tenant(session, landlord_id=landlord.id, name="Второй",
+                                               type=OrgType.ooo, inn="7100000002")
+    await session.flush()
+    await directory_service.create_lease(session, tenant_id=t.id, premises_id=p.id,
+        contract_no="Второй", contract_date=date(2026, 11, 1), rent_amount=Decimal("20000"))
+    await session.flush()
+    html, _ = await karta_service.render_html(session, landlord.id)
+    assert "Первый" in html.decode() and "Второй" in html.decode()
+    assert "не рассчитана" in html.decode()

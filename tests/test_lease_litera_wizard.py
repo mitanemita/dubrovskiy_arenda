@@ -120,3 +120,16 @@ async def test_site_buttons_assign_and_remove_without_changing_lease_data(factor
     async with f() as s:
         assert (await s.get(Premises, pid)).site_id is None
         assert (await s.execute(select(Tenant.name))).scalars().all() == before
+
+
+async def test_premises_readiness_selected_from_buttons(factory):
+    f, screens = factory
+    state = _state()
+    async with f() as s:
+        pid = (await s.execute(select(Premises.id))).scalar_one()
+    await hd.premises_readiness_menu(_cb(f"pread:{pid}"), state)
+    assert "готовность" in screens[-1].lower()
+    await hd.premises_set_readiness(_cb(f"prset:{pid}:build"), state)
+    async with f() as s:
+        assert (await s.get(Premises, pid)).readiness == "build"
+    assert "Стройка" in screens[-1]

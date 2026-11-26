@@ -64,6 +64,13 @@ async def update_landlord_field(session: AsyncSession, landlord_id: int, field: 
 
 
 # --- Помещения -------------------------------------------------------------
+READINESS_LABELS = {
+    "ready": "Готово к сдаче",
+    "notready": "Не готово к сдаче",
+    "closed": "Не сдаётся",
+    "tech": "Техническое",
+    "build": "Стройка",
+}
 LITERA_MAX_LEN = 32
 
 
@@ -324,6 +331,7 @@ PREMISES_FIELDS: dict[str, str] = {
     "label": "Название/№",
     "address": "Адрес",
     "area": "Площадь, м²",
+    "asking_rate": "Предполагаемая ставка, ₽/м²",
 }
 
 
@@ -376,6 +384,19 @@ async def update_premises_field(session: AsyncSession, premises_id: int, field: 
             premises.site_id = site.id
     elif field == "address":
         premises.address = value or None
+    elif field == "asking_rate":
+        if not value:
+            premises.asking_rate = None
+        else:
+            try:
+                rate = Decimal(value.replace(",", ".").replace(" ", ""))
+            except Exception as exc:
+                raise ValueError("Ставка должна быть числом.") from exc
+            if not rate.is_finite() or rate < 0 or rate > Decimal("9999999999.99"):
+                raise ValueError("Ставка должна быть от 0 до 9 999 999 999,99 ₽/м².")
+            if rate.as_tuple().exponent < -2:
+                raise ValueError("Укажите не более двух знаков после запятой.")
+            premises.asking_rate = rate
     elif field == "area":
         if not value:
             premises.area = None

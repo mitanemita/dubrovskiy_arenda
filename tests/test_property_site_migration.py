@@ -26,7 +26,7 @@ def test_site_migration_preserves_existing_business_data(tmp_path):
         conn.execute("INSERT INTO payments (id,lease_id,amount,source,status) VALUES (1,1,5000,'manual','confirmed')")
         before = [conn.execute(f"SELECT * FROM {t}").fetchall() for t in ("landlords", "tenants", "leases", "payments")]
         premises = conn.execute("SELECT * FROM premises").fetchall()
-    migrate("upgrade", "head")
+    migrate("upgrade", "0009")
     with sqlite3.connect(db) as conn:
         after = [conn.execute(f"SELECT * FROM {t}").fetchall() for t in ("landlords", "tenants", "leases", "payments")]
         assert after == before
