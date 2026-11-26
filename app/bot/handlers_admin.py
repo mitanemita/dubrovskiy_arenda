@@ -12,9 +12,10 @@ UI-обёртки над сервисами (settings/expense/reading/adjustment
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from html import escape
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -32,6 +33,7 @@ from aiogram.types import (
 )
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.services import karta_link
 from app.utils.logger import logger
 from app.bot.keyboards import cancel_kb, finance_back_kb, finance_menu_kb, main_menu_kb
@@ -1206,6 +1208,17 @@ async def _open_task_card(message: Message, task_id: int, *, wizard: bool = Fals
 
 
 # --- Выполненные задачи ----------------------------------------------------
+def _task_done_date(t) -> str:
+    """Показывает дату выполнения в часовом поясе бота; для старых задач — изменение."""
+    stamp = t.completed_at or t.updated_at
+    if stamp is None:
+        return "дата неизвестна"
+    if stamp.tzinfo is None:  # SQLite хранит UTC без информации о часовом поясе.
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    local_date = stamp.astimezone(ZoneInfo(get_settings().timezone)).strftime("%d.%m.%Y")
+    return f"выполнена {local_date}" if t.completed_at else f"изменена {local_date}"
+
+
 @router.callback_query(F.data == "tasks:done")
 @router.callback_query(F.data.startswith("tasks:donep:"))
 async def tasks_done_list(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1223,7 +1236,7 @@ async def tasks_done_list(callback: CallbackQuery, state: FSMContext) -> None:
     else:
         lines.append(f"Стр. {offset // _TASKS_PAGE + 1}/{(total + _TASKS_PAGE - 1) // _TASKS_PAGE}")
     for i, t in enumerate(page, start=offset + 1):
-        lines.append(f"{i}. {_short_html(t.title, 80)} · {_short_html(_assignee_label(t.assignee), 35)}")
+        lines.append(f"{i}. {_short_html(t.title, 80)} · {_short_html(_assignee_label(t.assignee), 35)} · {_task_done_date(t)}")
     buttons = [InlineKeyboardButton(text=str(i), callback_data=f"tddel:{t.id}")
                for i, t in enumerate(page, start=offset + 1)]
     rows = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]

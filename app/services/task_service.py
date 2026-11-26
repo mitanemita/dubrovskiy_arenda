@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -178,7 +178,7 @@ async def list_done_tasks(session: AsyncSession, landlord_id: int) -> list[Task]
     """Выполненные задачи (хранятся, пока их не удалят вручную)."""
     result = await session.execute(
         select(Task).where(Task.landlord_id == landlord_id, Task.status == TaskStatus.done)
-        .order_by(Task.updated_at.desc())
+        .order_by(func.coalesce(Task.completed_at, Task.updated_at).desc(), Task.id.desc())
     )
     return list(result.scalars().all())
 
@@ -231,8 +231,9 @@ async def delete_task(session: AsyncSession, task_id: int) -> bool:
 
 async def mark_done(session: AsyncSession, task_id: int) -> Task | None:
     task = await session.get(Task, task_id)
-    if task is not None:
+    if task is not None and task.status != TaskStatus.done:
         task.status = TaskStatus.done
+        task.completed_at = datetime.now(timezone.utc)
     return task
 
 

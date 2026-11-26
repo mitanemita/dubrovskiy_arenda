@@ -126,3 +126,49 @@ async def test_add_task_by_priority_returns_to_task_list(session, bot_db, monkey
     assert "Новая задача" in rendered[-1][0]
     assert f"tpick:{tasks[0].id}" in buttons(rendered[-1][1])
     cb.answer.assert_awaited_once()
+
+
+async def test_done_list_displays_completion_and_legacy_dates(session, bot_db, monkeypatch):
+    from datetime import datetime, timezone
+
+    from app.db.enums import TaskStatus
+
+    landlord = await make_landlord(session, "Первый", 123)
+    new = await task_service.create_task(session, landlord_id=landlord.id, title="Новая")
+    old = await task_service.create_task(session, landlord_id=landlord.id, title="Старая")
+    await session.flush()
+    new.status = TaskStatus.done
+    new.completed_at = datetime(2026, 11, 25, 22, 30, tzinfo=timezone.utc)
+    old.status = TaskStatus.done
+    old.updated_at = datetime(2026, 11, 24, 22, 30, tzinfo=timezone.utc)
+    await session.commit()
+    monkeypatch.setattr(ui, "get_settings", lambda: SimpleNamespace(timezone="Europe/Moscow"))
+    rendered = []
+
+    async def show(message, text, reply_markup=None):
+        rendered.append(text)
+
+    monkeypatch.setattr(ui, "edit_or_send", show)
+    await ui.tasks_done_list(callback("tasks:done"), State())
+    assert "Новая · 👥 общая · выполнена 26.11.2026" in rendered[-1]
+    assert "Старая · 👥 общая · изменена 25.11.2026" in rendered[-1]
+
+
+async def test_completion_time_is_saved_and_not_reset(session, bot_db):
+    from datetime import datetime, timezone
+
+    landlord = await make_landlord(session, "Первый", 123)
+    task = await task_service.create_task(session, landlord_id=landlord.id, title="Задача")
+    await session.flush()
+    before = datetime.now(timezone.utc)
+    await task_service.mark_done(session, task.id)
+    await session.flush()
+    completed_at = task.completed_at
+    assert before <= completed_at <= datetime.now(timezone.utc)
+    await task_service.mark_done(session, task.id)
+    await session.commit()
+    assert task.completed_at == completed_at
+    task_id = task.id
+    session.expire_all()
+    saved = await task_service.get_task(session, task_id)
+    assert saved.completed_at.replace(tzinfo=timezone.utc) == completed_at
