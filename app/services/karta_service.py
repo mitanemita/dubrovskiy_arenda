@@ -31,7 +31,9 @@ def _template() -> tuple[str, list[dict]]:
 def _key(litera: str | None) -> str:
     """Сравнение литер без учёта регистра и пробелов; латиница-двойник -> кириллица."""
     s = "".join((litera or "").split()).upper()
-    return s.translate(str.maketrans("ABCEHKMOPTXY", "АВСЕНКМОРТХУ"))
+    s = s.translate(str.maketrans("ABCEHKMOPTXY", "АВСЕНКМОРТХУ"))
+    # Исторически на плане Г3 была ошибочно записана двумя буквами «ГЗ».
+    return "Г3" if s == "ГЗ" else s
 
 
 async def _krasnodar_by_litera(session: AsyncSession, landlord_id: int) -> dict[str, dict]:
