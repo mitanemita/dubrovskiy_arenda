@@ -193,5 +193,5 @@ playwright install chromium
 | `TelegramConflictError: terminated by other getUpdates request` | Тот же токен бота запущен на сервере — используйте тестового бота |
 | `Failed building wheel for asyncpg` | Python 3.12/3.13 — поставьте 3.11 |
 | Docker: `WSL 2 installation is incomplete` | PowerShell от администратора: `wsl --install`, перезагрузка |
-| `password authentication failed` | Поменяли `DB_PASSWORD` после первого запуска — `docker compose down -v` (удалит локальную БД) и запустить заново |
+| `password authentication failed` | Проверьте прежний пароль и настройки `.env`; смена переменной сама по себе не меняет пароль уже созданной БД. Не удаляйте том с данными. |
 | Кракозябры в `.env` / названиях | Сохраните `.env` в кодировке UTF-8 |

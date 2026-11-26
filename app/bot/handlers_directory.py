@@ -11,11 +11,13 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from html import escape
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy import select
 
 from app.bot.handlers_admin import (
     _landlord_id,
@@ -28,7 +30,7 @@ from app.bot.handlers_admin import (
 )
 from app.db.base import async_session_factory
 from app.db.enums import OrgType
-from app.db.models import Lease, Premises, Tenant
+from app.db.models import Lease, Premises, PropertySite, Tenant
 from app.bot.keyboards import back_kb, cancel_kb, main_menu_kb
 from app.services import directory_service
 
@@ -199,12 +201,14 @@ async def _render_premises_card(message, pid: int) -> bool:
     async with async_session_factory() as session:
         p = await session.get(Premises, pid)
         occ = await directory_service.active_occupants(session, p.landlord_id) if p else {}
+        site = await session.get(PropertySite, p.site_id) if p and p.site_id else None
     if p is None:
         return False
     area = f", {p.area} м²" if p.area is not None else ""
     text = (
         f"<b>Помещение</b>\n{p.label}{area}\n"
         f"Литера: {p.litera or '— не указана'}\n"
+        f"Площадка: {escape(site.name) if site else '— не указана'}\n"
         f"Статус: {_status_label(p.is_occupied)}"
     )
     if p.is_occupied and occ.get(p.id):
@@ -212,6 +216,7 @@ async def _render_premises_card(message, pid: int) -> bool:
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"pedit:{p.id}"),
          InlineKeyboardButton(text="🗑 Удалить", callback_data=f"pdel:{p.id}")],
+        [InlineKeyboardButton(text="🗺 Площадка", callback_data=f"psite:{p.id}")],
         [InlineKeyboardButton(text="◀️ К помещениям", callback_data="dir:premises")],
     ])
     await wiz_reply(message, text, reply_markup=kb)
@@ -226,6 +231,55 @@ async def premises_card(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Помещение не найдено", show_alert=True)
         return
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("psite:"))
+async def premises_site_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    pid = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        p = await session.get(Premises, pid)
+        if not p or p.landlord_id != lid:
+            await callback.answer("Помещение не найдено", show_alert=True)
+            return
+        sites = (await session.execute(select(PropertySite).where(
+            PropertySite.landlord_id == lid
+        ).order_by(PropertySite.name))).scalars().all()
+    rows = [[InlineKeyboardButton(text="📍 Краснодар", callback_data=f"pset:{pid}:kr")]]
+    rows.extend([[InlineKeyboardButton(text=f"📍 {site.name}", callback_data=f"pset:{pid}:{site.id}")]
+                 for site in sites if site.name.casefold() != "краснодар"])
+    rows += [[InlineKeyboardButton(text="➕ Другая площадка", callback_data=f"pfield:site:{pid}")],
+             [InlineKeyboardButton(text="✖️ Убрать привязку", callback_data=f"pset:{pid}:none")],
+             [InlineKeyboardButton(text="◀️ К помещению", callback_data=f"ppick:{pid}")]]
+    await edit_or_send(callback.message, "Выберите площадку помещения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pset:"))
+async def premises_set_site(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    _, raw_pid, raw_site = callback.data.split(":")
+    pid = int(raw_pid)
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        p = await session.get(Premises, pid)
+        if not p or p.landlord_id != lid:
+            await callback.answer("Помещение не найдено", show_alert=True)
+            return
+        if raw_site == "kr":
+            await directory_service.update_premises_field(session, pid, "site", "Краснодар")
+        elif raw_site == "none":
+            p.site_id = None
+        else:
+            site = await session.get(PropertySite, int(raw_site))
+            if site is None or site.landlord_id != lid:
+                await callback.answer("Площадка не найдена", show_alert=True)
+                return
+            p.site_id = site.id
+        await session.commit()
+    await _render_premises_card(callback.message, pid)
+    await callback.answer("Площадка сохранена")
 
 
 @router.callback_query(F.data.startswith("pedit:"))
@@ -244,9 +298,11 @@ async def premises_edit_field(callback: CallbackQuery, state: FSMContext) -> Non
     _, field, pid = callback.data.split(":")
     await state.update_data(edit_kind="premises", edit_id=int(pid), edit_field=field)
     await state.set_state(EditFSM.value)
+    hint = ("\nДля карты Краснодара укажите <b>Краснодар</b>. Для других площадок "
+            "введите их название; пока у них нет планов." if field == "site" else "")
     await edit_or_send(
         callback.message,
-        f"Введите новое значение — {directory_service.PREMISES_FIELDS[field]} (или «-» чтобы очистить):",
+        f"Введите новое значение — {directory_service.PREMISES_FIELDS[field]} (или «-» чтобы очистить):{hint}",
         reply_markup=cancel_kb(),
     )
     await callback.answer()
@@ -372,6 +428,7 @@ async def _premises_finish(message: Message, tg_id: int, state: FSMContext, *, a
             )
             await session.flush()
             label = directory_service.premises_title(p)
+            pid = p.id
             await session.commit()
         except ValueError as exc:
             await session.rollback()
@@ -379,7 +436,12 @@ async def _premises_finish(message: Message, tg_id: int, state: FSMContext, *, a
             await wiz_reply(message, f"❌ {exc}", reply_markup=main_menu_kb())
             return
     await state.clear()
-    await wiz_reply(message, f"✅ Помещение «{label}» добавлено (🟢 свободно).", reply_markup=_list_kb("dadd:premises"))
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗺 Указать площадку", callback_data=f"psite:{pid}")],
+        [InlineKeyboardButton(text="➕ Добавить помещение", callback_data="dadd:premises")],
+        [InlineKeyboardButton(text="◀️ Справочники", callback_data="menu:directory")],
+    ])
+    await wiz_reply(message, f"✅ Помещение «{label}» добавлено (🟢 свободно).", reply_markup=kb)
 
 
 # --- Арендаторы ------------------------------------------------------------

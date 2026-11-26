@@ -29,6 +29,7 @@ async def _lease(session, lid, *, litera, label, rent, tenant="ООО Ромаш
     p = await directory_service.create_premises(session, landlord_id=lid, label=label, litera=litera)
     t = await directory_service.create_tenant(session, landlord_id=lid, name=tenant, type=OrgType.ooo, inn=inn)
     await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
     await directory_service.create_lease(
         session, tenant_id=t.id, premises_id=p.id, contract_no=f"{litera}-1",
         contract_date=date(2026, 11, 1), rent_amount=Decimal(rent),
@@ -44,9 +45,11 @@ async def landlord(session):
     return lord
 
 
-async def test_map_without_leases_equals_template(session, landlord):
+async def test_unassigned_map_does_not_show_template_tenants(session, landlord):
     html, summary = await karta_service.render_html(session, landlord.id)
-    assert html == karta_service.TEMPLATE_PATH.read_bytes()
+    assert _poly(html.decode(), "Д") == "c-unknown"
+    assert "Жернев" not in html.decode()
+    assert summary["counts"]["unknown"] > 0
     assert summary["issues"] == []
 
 
@@ -58,7 +61,8 @@ async def test_lease_by_litera_colors_map(session, landlord):
     html, summary = await karta_service.render_html(session, landlord.id, now=datetime(2026, 11, 13, 10, 0))
     html = html.decode()
     assert _poly(html, "Д") == "c-busy" and _poly(html, "2Д") == "c-busy"
-    assert "ООО Ромашка" in html and "100000 ₽" in html and "498,3 ₽/м²" in html
+    assert "ООО Ромашка" in html and "100000 ₽" in html
+    assert "498,3 ₽/м²" not in html
     assert summary["not_on_plan"] == ["Б-17"]
     cap = karta_service.caption(summary)
     assert "13.11.2026" in cap and "Б-17" in cap and len(cap) < 1024
@@ -124,3 +128,64 @@ async def test_back_from_document_deletes_it(bot_env):
     doc.answer.assert_awaited_once()
     doc.delete.assert_awaited_once()
     assert ha._PANELS[1] == 22
+
+
+async def test_map_uses_only_explicit_krasnodar_bindings(session, landlord):
+    from app.db.models import Lease, Premises, PropertySite, Tenant
+    from sqlalchemy import select
+
+    await _lease(session, landlord.id, litera="Д", label="Краснодар", rent="100000", tenant="Арендатор Краснодара")
+    other = await directory_service.create_premises(session, landlord_id=landlord.id, label="Другой город", litera="Д")
+    unassigned = await directory_service.create_premises(session, landlord_id=landlord.id, label="Без города", litera="Д")
+    await session.flush()
+    await directory_service.update_premises_field(session, other.id, "site", "Другой город")
+    for i, p in enumerate((other, unassigned), start=1):
+        t = await directory_service.create_tenant(session, landlord_id=landlord.id, name=f"Не Краснодар {i}",
+                                                   type=OrgType.ooo, inn=f"710000000{i}")
+        await session.flush()
+        await directory_service.create_lease(session, tenant_id=t.id, premises_id=p.id,
+            contract_no=f"X{i}", contract_date=date(2026, 11, 1), rent_amount=Decimal("900000"))
+    await session.flush()
+    html, summary = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    assert _poly(text, "Д") == "c-busy"
+    assert "Арендатор Краснодара" in text
+    assert "Не Краснодар" not in text
+    assert "900000 ₽" not in text
+    assert summary["rent_total"] == Decimal("100000")
+    # Никакие записи арендаторов и договоров при формировании карты не меняются.
+    assert len((await session.execute(select(Tenant))).scalars().all()) == 3
+    assert len((await session.execute(select(Lease))).scalars().all()) == 3
+    assert len((await session.execute(select(Premises))).scalars().all()) == 3
+    assert len((await session.execute(select(PropertySite))).scalars().all()) == 2
+
+
+async def test_site_assignment_is_case_insensitive_and_reversible(session, landlord):
+    from app.db.models import PropertySite
+    from sqlalchemy import select
+
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="А", litera="Д")
+    q = await directory_service.create_premises(session, landlord_id=landlord.id, label="Б", litera="Е6")
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "  Краснодар ")
+    await directory_service.update_premises_field(session, q.id, "site", "краснодар")
+    assert p.site_id == q.site_id
+    assert len((await session.execute(select(PropertySite))).scalars().all()) == 1
+    await directory_service.update_premises_field(session, p.id, "site", "")
+    assert p.site_id is None
+
+
+async def test_map_is_rebuilt_when_location_changes(session, landlord):
+    from app.db.models import Premises
+    from sqlalchemy import select
+
+    await _lease(session, landlord.id, litera="Д", label="Склад", rent="100000", tenant="Текущий")
+    p = (await session.execute(select(Premises))).scalar_one()
+    before, _ = await karta_service.render_html(session, landlord.id)
+    assert _poly(before.decode(), "Д") == "c-busy"
+    await directory_service.update_premises_field(session, p.id, "site", "Другой город")
+    await session.flush()
+    after, summary = await karta_service.render_html(session, landlord.id)
+    assert _poly(after.decode(), "Д") == "c-unknown"
+    assert "Текущий" not in after.decode()
+    assert summary["rent_total"] == 0

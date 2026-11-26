@@ -97,3 +97,26 @@ async def test_wizard_keep_litera(factory):
         await hd.lease_keep_litera(_cb("dll:keep"), state)
     p, _ = await _run(state, factory, keep)
     assert p.litera == "Д"
+
+
+async def test_site_buttons_assign_and_remove_without_changing_lease_data(factory):
+    from app.db.models import PropertySite
+
+    f, screens = factory
+    state = _state()
+    async with f() as s:
+        pid = (await s.execute(select(Premises.id))).scalar_one()
+        before = (await s.execute(select(Tenant.name))).scalars().all()
+    await hd.premises_site_menu(_cb(f"psite:{pid}"), state)
+    assert "Выберите площадку" in screens[-1]
+    await hd.premises_set_site(_cb(f"pset:{pid}:kr"), state)
+    async with f() as s:
+        p = await s.get(Premises, pid)
+        site = await s.get(PropertySite, p.site_id)
+        assert site.name == "Краснодар" and site.template_key == "krasnodar"
+        assert (await s.execute(select(Tenant.name))).scalars().all() == before
+    assert "Краснодар" in screens[-1]
+    await hd.premises_set_site(_cb(f"pset:{pid}:none"), state)
+    async with f() as s:
+        assert (await s.get(Premises, pid)).site_id is None
+        assert (await s.execute(select(Tenant.name))).scalars().all() == before

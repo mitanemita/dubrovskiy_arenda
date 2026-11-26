@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.enums import LeaseStatus, OrgType
-from app.db.models import Landlord, Lease, Meter, Premises, Tenant
+from app.db.models import Landlord, Lease, Meter, Premises, PropertySite, Tenant
 
 # Реквизиты арендодателя, правимые через бота: поле -> (подпись, тип валидации)
 LANDLORD_FIELDS: dict[str, str] = {
@@ -320,6 +320,7 @@ TENANT_FIELDS: dict[str, str] = {
 }
 PREMISES_FIELDS: dict[str, str] = {
     "litera": "Литера",
+    "site": "Площадка / город",
     "label": "Название/№",
     "address": "Адрес",
     "area": "Площадь, м²",
@@ -356,6 +357,23 @@ async def update_premises_field(session: AsyncSession, premises_id: int, field: 
         premises.label = value
     elif field == "litera":
         premises.litera = normalize_litera(value)
+    elif field == "site":
+        name = " ".join(value.split())
+        if len(name) > 120:
+            raise ValueError("Название площадки слишком длинное (до 120 символов).")
+        if not name:
+            premises.site_id = None
+        else:
+            sites = (await session.execute(select(PropertySite).where(
+                PropertySite.landlord_id == premises.landlord_id,
+            ))).scalars().all()
+            site = next((s for s in sites if s.name.casefold() == name.casefold()), None)
+            if site is None:
+                site = PropertySite(landlord_id=premises.landlord_id, name=name,
+                                    template_key="krasnodar" if name.casefold() == "краснодар" else None)
+                session.add(site)
+                await session.flush()
+            premises.site_id = site.id
     elif field == "address":
         premises.address = value or None
     elif field == "area":

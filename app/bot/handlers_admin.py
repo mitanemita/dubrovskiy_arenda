@@ -1610,7 +1610,9 @@ async def _build_map_link(tg_id: int) -> tuple[str, str] | None:
         if url is None:
             return None
         data, not_on_plan = await karta_service.build_data(session, lid)
+        unassigned = await karta_service.unassigned_count(session, lid)
     summary = karta_service.summarize(data, not_on_plan, now=datetime.now())
+    summary["unassigned"] = unassigned
     return url, karta_service.caption(summary, link=True)
 
 
