@@ -253,6 +253,10 @@ async def test_map_uses_database_area_rent_and_rate(session, landlord):
     await session.flush()
     html, summary = await karta_service.render_html(session, landlord.id)
     text = html.decode()
+    card = re.search(r'<div class="info a1" id="i-Д".*?</div></div>', text).group(0)
+    assert re.search(r'data-f="db_area"><span>Площадь</span><span>200 м²</span>', card)
+    assert 'Площадь по плану' not in card and 'Площадь по учёту' not in card
+    assert re.search(r'<text[^>]*data-a="Д"[^>]*>200 м²</text>', text)
     assert _poly(text, "Д") == "c-busy"  # действующий арендатор определяет занятость
     assert "Арендатор" in text and "60000,5 ₽" in text
     assert re.search(r'data-f="rate"><span>Предполагаемая ставка</span><span>300,25 ₽/м²</span>', text)
@@ -260,6 +264,16 @@ async def test_map_uses_database_area_rent_and_rate(session, landlord):
     assert "Не готово к сдаче" in text
     assert summary["rent_total"] == Decimal("60000.50")
     assert "60 000,50 ₽" in karta_service.caption(summary)
+
+
+async def test_map_area_missing_does_not_show_old_plan_total(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Д", litera="Д")
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    html, _ = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    assert re.search(r'data-f="db_area"><span>Площадь</span><span>не указана</span>', text)
+    assert re.search(r'<text[^>]*data-a="Д"[^>]*></text>', text)
 
 
 async def test_missing_or_ambiguous_area_does_not_invent_fact_rate(session, landlord):

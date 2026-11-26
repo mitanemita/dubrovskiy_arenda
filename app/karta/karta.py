@@ -204,11 +204,11 @@ def render_info(item: dict, floor: int) -> str:
     rc, area = rooms_count(item), total_area(item)
     if rc is not None:
         out.append(_row("rooms_count", "Помещений", rc))
-    if area is not None:
-        out.append(_row("area", "Площадь по плану" if "db_area" in item else "Общая площадь", f"{_num(area)} м²"))
     if "db_area" in item:
         db_area = _dec(item.get("db_area"))
-        out.append(_row("db_area", "Площадь по учёту", f"{_num(db_area, 2)} м²" if db_area is not None else "не указана"))
+        out.append(_row("db_area", "Площадь", f"{_num(db_area, 2)} м²" if db_area is not None else "не указана"))
+    elif area is not None:
+        out.append(_row("area", "Общая площадь", f"{_num(area)} м²"))
     rooms = item.get("rooms") or []
     if rooms:
         lis = []
@@ -280,7 +280,12 @@ def apply(html: str, data: list[dict]) -> str:
 
     def area(m):
         it = by_id.get(m.group(2))
-        a = total_area(it) if it else None
+        if not it:
+            return m.group(0)
+        if "db_area" in it:
+            a = _dec(it.get("db_area"))
+            return f"{m.group(1)}{_num(a, 2) + ' м²' if a is not None else ''}{m.group(3)}"
+        a = total_area(it)
         return m.group(0) if a is None else f"{m.group(1)}{_num(a)} м²{m.group(3)}"
 
     html = POLY_RE.sub(poly, html)
