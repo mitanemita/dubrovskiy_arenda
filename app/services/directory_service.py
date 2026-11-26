@@ -111,7 +111,7 @@ async def create_premises(
         raise ValueError("Площадь должна быть больше нуля.")
     premises = Premises(
         landlord_id=landlord_id, label=label, address=address, area=area, is_occupied=is_occupied,
-        litera=normalize_litera(litera),
+        litera=normalize_litera(litera), readiness="ready",
     )
     session.add(premises)
     return premises

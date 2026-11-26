@@ -129,6 +129,22 @@ def _status_label(is_occupied: bool) -> str:
     return "🔴 занято" if is_occupied else "🟢 свободно"
 
 
+def _all_premises_status(p: Premises, has_active_lease: bool) -> str:
+    """Статус в общем списке: подтверждённый договор и готовность помещения."""
+    if has_active_lease:
+        return "🔵 арендовано"
+    if p.is_occupied:
+        return "⚪ занятость не подтверждена"
+    return {
+        None: "🟢 свободно",
+        "ready": "🟢 свободно",
+        "notready": "🟠 не готово",
+        "closed": "⚫ не сдаётся",
+        "tech": "⚙️ техническое",
+        "build": "🔴 стройка",
+    }.get(p.readiness, "⚪ нет данных")
+
+
 def _prem_submenu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🟢 Свободные", callback_data="premlist:free:0"),
@@ -158,9 +174,9 @@ async def premises_list(callback: CallbackQuery, state: FSMContext) -> None:
         occ = await directory_service.active_occupants(session, lid) if lid else {}
 
     if flt == "free":
-        items = [p for p in items if not p.is_occupied]
+        items = [p for p in items if not p.is_occupied and not occ.get(p.id)]
     elif flt == "occ":
-        items = [p for p in items if p.is_occupied]
+        items = [p for p in items if p.is_occupied or occ.get(p.id)]
 
     total = len(items)
     offset = max(0, min(offset, (total - 1) // _PREM_PAGE * _PREM_PAGE if total else 0))
@@ -175,9 +191,10 @@ async def premises_list(callback: CallbackQuery, state: FSMContext) -> None:
         for idx, p in enumerate(page, start=offset + 1):
             area = f", {p.area} м²" if p.area is not None else ""
             who = ""
-            if p.is_occupied and occ.get(p.id):
+            if occ.get(p.id):
                 who = " · " + ", ".join(occ[p.id])
-            lines.append(f"{idx}. {directory_service.premises_title(p)}{area} · {_status_label(p.is_occupied)}{who}")
+            status = _all_premises_status(p, bool(occ.get(p.id))) if flt == "all" else _status_label(p.is_occupied or bool(occ.get(p.id)))
+            lines.append(f"{idx}. {directory_service.premises_title(p)}{area} · {status}{who}")
 
     num_buttons = [
         InlineKeyboardButton(text=str(offset + idx), callback_data=f"ppick:{p.id}")
