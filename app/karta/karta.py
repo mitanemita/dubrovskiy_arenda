@@ -203,7 +203,8 @@ def render_info(item: dict, floor: int) -> str:
 
     rc, area = rooms_count(item), total_area(item)
     if rc is not None:
-        out.append(_row("rooms_count", "Помещений", rc))
+        two_floors = set(item.get("floors", [])) == {1, 2}
+        out.append(_row("rooms_count", "Помещений (2 этажа)" if two_floors else "Помещений", rc))
     if "db_area" in item:
         db_area = _dec(item.get("db_area"))
         out.append(_row("db_area", "Площадь", f"{_num(db_area, 2)} м²" if db_area is not None else "не указана"))
@@ -213,6 +214,8 @@ def render_info(item: dict, floor: int) -> str:
     if rooms:
         lis = []
         for n, r in enumerate(rooms, 1):
+            if item.get("display_rooms_by_floor") and r.get("floor") != floor:
+                continue
             extra = []
             if r.get("note"):
                 extra.append(r["note"])

@@ -361,6 +361,25 @@ async def test_i7_plan_and_room_data_survive_database_render(session, landlord):
     assert '<span>Площадь</span><span>145,5 м²</span>' in card
 
 
+@pytest.mark.parametrize("litera,area,count,first,second", [
+    ("П", "130.30", 3, [1], [2, 3]),
+    ("Д", "200.70", 11, list(range(1, 10)), [10, 11]),
+])
+async def test_two_floor_rooms_keep_total_count_and_show_selected_floor(session, landlord, litera, area, count, first, second):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label=litera, litera=litera)
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    p.area = Decimal(area)
+    await session.flush()
+    html, _ = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    for prefix, numbers in (("i", first), ("j", second)):
+        card = re.search(rf'<div class="info a[12]" id="{prefix}-{litera}".*?</div></div>', text).group(0)
+        assert f'<span>Помещений (2 этажа)</span><span>{count}</span>' in card
+        assert f'<span>Площадь</span><span>{area.rstrip("0").replace(".", ",")} м²</span>' in card
+        assert [int(n) for n in re.findall(r'<li><span>Помещение (\d+)', card)] == numbers
+
+
 async def test_e8_remains_technical_even_if_database_has_old_data(session, landlord):
     p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Е8", litera="Е8")
     await session.flush()
