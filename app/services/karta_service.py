@@ -102,6 +102,12 @@ async def build_data(session: AsyncSession, landlord_id: int) -> tuple[list[dict
                 "tech": "tech", "build": "build"}
     for item in data:
         k = _key(item["id"])
+        # Технические участки заданы планом и не требуют записей в справочнике.
+        if item.get("kind") == "tech" or item["id"] == "Е8":
+            if item["id"] == "Е8":
+                on_plan.add(k)
+            karta.update(data, item["id"], status="tech")
+            continue
         on_plan.add(k)
         info = assigned.get(k)
         # Описания и цены из шаблона не являются текущими данными учёта.

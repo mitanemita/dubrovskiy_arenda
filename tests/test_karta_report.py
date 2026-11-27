@@ -55,6 +55,25 @@ async def test_unassigned_map_does_not_show_template_tenants(session, landlord):
     assert summary["issues"] == []
 
 
+async def test_technical_areas_need_no_database_entries(session, landlord):
+    html, summary = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    for n in range(1, 10):
+        key = f"T{n}" if n < 7 else f"2T{n}"
+        assert _poly(text, key) == "c-tech"
+        prefix = "i" if n < 7 else "j"
+        assert re.search(rf'<div class="info a[12]" id="{prefix}-T{n}"[^>]*>\s*<h2>Техническое помещение</h2>', text)
+    assert _poly(text, "Е8") == "c-tech"
+    assert summary["counts"]["tech"] >= 10
+
+
+async def test_real_cyrillic_t1_does_not_match_technical_area(session, landlord):
+    await _lease(session, landlord.id, litera="Т1", label="Настоящая литера", rent="10000")
+    html, summary = await karta_service.render_html(session, landlord.id)
+    assert _poly(html.decode(), "T1") == "c-tech"
+    assert summary["not_on_plan"] == ["Т1"]
+
+
 async def test_lease_by_litera_colors_map(session, landlord):
     # Д в шаблоне свободна; договор на помещение с литерой «д » (регистр/пробел не важны)
     await _lease(session, landlord.id, litera="д ", label="Склад", rent="100000")
@@ -250,7 +269,7 @@ async def test_new_premises_is_free_by_default_on_map(session, landlord):
     assert _poly(html.decode(), "Г3") == "c-free"
 
 
-async def test_e8_status_follows_database_readiness_and_active_lease(session, landlord):
+async def test_e8_remains_technical_even_if_database_has_old_data(session, landlord):
     p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Е8", litera="Е8")
     await session.flush()
     await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
@@ -262,7 +281,7 @@ async def test_e8_status_follows_database_readiness_and_active_lease(session, la
     p.readiness = "ready"
     await session.flush()
     html, _ = await karta_service.render_html(session, landlord.id)
-    assert _poly(html.decode(), "Е8") == "c-free"
+    assert _poly(html.decode(), "Е8") == "c-tech"
 
     p.readiness = "tech"
     tenant = await directory_service.create_tenant(
@@ -275,9 +294,9 @@ async def test_e8_status_follows_database_readiness_and_active_lease(session, la
     )
     await session.flush()
     html, summary = await karta_service.render_html(session, landlord.id)
-    assert _poly(html.decode(), "Е8") == "c-busy"
-    assert "Арендатор Е8" in html.decode()
-    assert summary["rent_total"] == Decimal("10000")
+    assert _poly(html.decode(), "Е8") == "c-tech"
+    assert "Арендатор Е8" not in html.decode()
+    assert summary["rent_total"] == 0
 
 
 async def test_map_uses_database_area_rent_and_rate(session, landlord):
