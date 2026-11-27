@@ -220,7 +220,7 @@ def render_info(item: dict, floor: int) -> str:
             if rf and rf != floor:
                 extra.append("2 этаж" if rf == 2 else "первый этаж")
             name = f"Помещение {n}" + (f" ({'; '.join(extra)})" if extra else "")
-            lis.append(f"<li><span>{_e(name)}</span><span>{_num(_dec(r.get('area')) or Decimal(0))} м²</span></li>")
+            lis.append(f"<li><span>{_e(name)}</span><span>{_num(_dec(r.get('area')) or Decimal(0), 2)} м²</span></li>")
         out.append('<ul class="rooms">' + "".join(lis) + "</ul>")
     for f in ("state", "comm", "doors", "purpose", "look"):
         if item.get(f) not in (None, ""):

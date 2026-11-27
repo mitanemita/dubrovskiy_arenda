@@ -269,6 +269,21 @@ async def test_new_premises_is_free_by_default_on_map(session, landlord):
     assert _poly(html.decode(), "Г3") == "c-free"
 
 
+async def test_l_plan_and_room_data_in_rendered_map(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Л", litera="Л")
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    p.area = Decimal("154.10")
+    html, _ = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    card = re.search(r'<div class="info a1" id="i-Л".*?</div></div>', text).group(0)
+    assert 'id="p-Л"' in text and 'body:has(#i-Л:target) #p-Л{display:block}' in text
+    assert len(re.findall(r'<li><span>Помещение \d+', card)) == 7
+    assert '29,52 м²' in card and '61,4 м²' in card and 'приблизительно' not in card
+    assert 'Нормальное' in card and 'Вода, туалет, свет' in card and 'Стандартные' in card
+    assert 'Производство, склад' in card and 'Плохой' in card
+
+
 async def test_e8_remains_technical_even_if_database_has_old_data(session, landlord):
     p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Е8", litera="Е8")
     await session.flush()
