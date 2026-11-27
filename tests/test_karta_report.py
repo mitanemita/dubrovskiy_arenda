@@ -314,6 +314,20 @@ async def test_k3_plan_and_details_survive_database_render(session, landlord):
     assert '<span>Площадь</span><span>158,9 м²</span>' in card
 
 
+async def test_i7_plan_and_room_data_survive_database_render(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="И7", litera="И7")
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    p.area = Decimal("145.5")
+    html, _ = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    card = re.search(r'<div class="info a1" id="i-И7".*?</div></div>', text).group(0)
+    assert 'id="p-И7"' in text and 'body:has(#i-И7:target) #p-И7{display:block}' in text
+    assert len(re.findall(r'<li><span>Помещение \d+', card)) == 2
+    assert '63 м²' in card and '82,5 м²' in card
+    assert '<span>Площадь</span><span>145,5 м²</span>' in card
+
+
 async def test_e8_remains_technical_even_if_database_has_old_data(session, landlord):
     p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Е8", litera="Е8")
     await session.flush()
