@@ -48,6 +48,9 @@ def test_zh3_footprint_matches_zh2():
     def points(key):
         return re.search(rf'data-k="{key}"><polygon[^>]*points="([^"]+)"', HTML).group(1)
     assert points("2Ж3") == points("Ж2")
+    floor2 = re.search(r'<g class="f2"><polygon points="([^"]+)"', HTML).group(1)
+    assert '3653,1926 3773,1923 3773,1072 3704,1072 3704,481' in floor2
+    assert '3776,845' not in floor2
 
 
 def test_d_total_count_and_area_stay_constant_while_rooms_follow_floor():
