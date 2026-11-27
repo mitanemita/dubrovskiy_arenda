@@ -298,6 +298,22 @@ async def test_e4_plan_and_room_data_survive_database_render(session, landlord):
     assert '<span>Площадь</span><span>71,32 м²</span>' in card
 
 
+async def test_k3_plan_and_details_survive_database_render(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="К3", litera="К3")
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    p.area = Decimal("158.9")
+    html, _ = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    card = re.search(r'<div class="info a1" id="i-К3".*?</div></div>', text).group(0)
+    assert 'id="p-К3"' in text and 'body:has(#i-К3:target) #p-К3{display:block}' in text
+    assert len(re.findall(r'<li><span>Помещение \d+', card)) == 5
+    assert '57 м²' in card and '36 м²' in card and '16,3 м²' in card
+    assert 'Среднее' in card and 'Средний' in card and 'Свет' in card
+    assert 'Распашные' in card and 'Производство или склад' in card
+    assert '<span>Площадь</span><span>158,9 м²</span>' in card
+
+
 async def test_e8_remains_technical_even_if_database_has_old_data(session, landlord):
     p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Е8", litera="Е8")
     await session.flush()
