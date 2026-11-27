@@ -314,6 +314,39 @@ async def test_k3_plan_and_details_survive_database_render(session, landlord):
     assert '<span>Площадь</span><span>158,9 м²</span>' in card
 
 
+async def test_all_rentable_litera_labels_follow_database_area(session, landlord):
+    _, items = karta_service._template()
+    rentable = [item for item in items if item.get("kind") != "tech" and item["id"] != "Е8"]
+    for i, item in enumerate(rentable):
+        p = await directory_service.create_premises(session, landlord_id=landlord.id,
+                                                    label=item["id"], litera=item["id"])
+        p.area = Decimal("100.25") + i
+        await session.flush()
+        await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    await session.flush()
+    html, _ = await karta_service.render_html(session, landlord.id)
+    text = html.decode()
+    for i, item in enumerate(rentable):
+        label = re.escape(item["id"])
+        values = re.findall(rf'<text[^>]*data-a="{label}"[^>]*>([^<]*)</text>', text)
+        assert len(values) == len(item.get("floors", [1])), item["id"]
+        assert all(v == f"{100 + i},25 м²" for v in values), item["id"]
+
+
+async def test_empty_area_label_clears_after_database_area_removed(session, landlord):
+    p = await directory_service.create_premises(session, landlord_id=landlord.id, label="Л", litera="Л")
+    await session.flush()
+    await directory_service.update_premises_field(session, p.id, "site", "Краснодар")
+    p.area = Decimal("125.75")
+    await session.flush()
+    before, _ = await karta_service.render_html(session, landlord.id)
+    assert re.search(r'<text[^>]*data-a="Л"[^>]*>125,75 м²</text>', before.decode())
+    p.area = None
+    await session.flush()
+    after, _ = await karta_service.render_html(session, landlord.id)
+    assert re.search(r'<text[^>]*data-a="Л"[^>]*></text>', after.decode())
+
+
 async def test_i7_plan_and_room_data_survive_database_render(session, landlord):
     p = await directory_service.create_premises(session, landlord_id=landlord.id, label="И7", litera="И7")
     await session.flush()
