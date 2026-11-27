@@ -30,6 +30,41 @@ def test_saved_file_is_consistent():
     assert karta.apply(HTML, data) == HTML
 
 
+def test_p_total_count_and_area_stay_constant_while_rooms_follow_floor():
+    data = karta.load(HTML)
+    item = next(x for x in data if x["id"] == "П")
+    for floor in (1, 2):
+        card = karta.render_info(item, floor)
+        assert '<span>Помещений (2 этажа)</span><span>3</span>' in card
+        assert '<span>Общая площадь</span><span>130,3 м²</span>' in card
+        if floor == 1:
+            assert 'Помещение 1' in card and 'Помещение 2' not in card and 'Помещение 3' not in card
+        else:
+            assert 'Помещение 1' not in card and 'Помещение 2' in card and 'Помещение 3' in card
+        assert 'Площадь этажа' not in card
+
+
+def test_zh3_footprint_matches_zh2():
+    def points(key):
+        return re.search(rf'data-k="{key}"><polygon[^>]*points="([^"]+)"', HTML).group(1)
+    assert points("2Ж3") == points("Ж2")
+    floor2 = re.search(r'<g class="f2"><polygon points="([^"]+)"', HTML).group(1)
+    assert '3653,1926 3773,1923 3773,1072 3704,1072 3704,481' in floor2
+    assert '3776,845' not in floor2
+
+
+def test_d_total_count_and_area_stay_constant_while_rooms_follow_floor():
+    item = next(x for x in karta.load(HTML) if x["id"] == "Д")
+    floor1 = karta.render_info(item, 1)
+    floor2 = karta.render_info(item, 2)
+    for card in (floor1, floor2):
+        assert '<span>Помещений (2 этажа)</span><span>11</span>' in card
+        assert '<span>Общая площадь</span><span>200,7 м²</span>' in card
+        assert 'Площадь этажа' not in card
+    assert 'Помещение 9' in floor1 and 'Помещение 10' not in floor1
+    assert 'Помещение 9' not in floor2 and 'Помещение 10' in floor2 and 'Помещение 11' in floor2
+
+
 def test_tenant_switches_color_on_both_floors():
     data = karta.load(HTML)
     karta.update(data, "Д", tenant="Иванов", rent_fact="100000")
