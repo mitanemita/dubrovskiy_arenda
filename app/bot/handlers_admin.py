@@ -415,16 +415,29 @@ async def expense_list(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     parts = callback.data.split(":")
     period = _period_from_code(parts[1]) if len(parts) > 1 else billing_service.period_start(date.today())
+    offset = int(parts[2]) if len(parts) > 2 else 0
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         items = await expense_service.list_expenses(session, lid, period) if lid else []
+    page_size = 10
+    offset = max(0, min(offset // page_size * page_size, (len(items) - 1) // page_size * page_size if items else 0))
+    page = items[offset:offset + page_size]
     lines = [f"<b>💸 Расходы — {_period_ru(period)}</b> (нажмите № для правки суммы):"]
     if not items:
         lines.append("— пусто")
-    for i, e in enumerate(items, start=1):
+    else:
+        lines.append(f"Стр. {offset // page_size + 1}/{(len(items) + page_size - 1) // page_size}")
+    for i, e in enumerate(page, start=offset + 1):
         lines.append(f"{i}. {_EXPENSE_LABELS.get(e.category, e.category.value)}: {e.amount} ₽")
-    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"ecorr:{e.id}") for i, e in enumerate(items, start=1)]
+    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"ecorr:{e.id}") for i, e in enumerate(page, start=offset + 1)]
     rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    nav = []
+    if offset:
+        nav.append(InlineKeyboardButton(text="◀️ Пред. стр.", callback_data=f"exp_list:{_period_code(period)}:{offset - page_size}"))
+    if offset + page_size < len(items):
+        nav.append(InlineKeyboardButton(text="След. стр. ▶️", callback_data=f"exp_list:{_period_code(period)}:{offset + page_size}"))
+    if nav:
+        rows.append(nav)
     rows.append([
         InlineKeyboardButton(text="◀️ Пред. месяц", callback_data=f"exp_list:{_period_code(_shift_month(period, -1))}"),
         InlineKeyboardButton(text="След. месяц ▶️", callback_data=f"exp_list:{_period_code(_shift_month(period, 1))}"),
@@ -451,17 +464,30 @@ async def lease_charges_list(callback: CallbackQuery, state: FSMContext) -> None
     parts = callback.data.split(":")
     lease_id = int(parts[1])
     period = _period_from_code(parts[2]) if len(parts) > 2 else billing_service.period_start(date.today())
+    offset = int(parts[3]) if len(parts) > 3 else 0
     async with async_session_factory() as session:
         charges = (await session.execute(
-            select(Charge).where(Charge.lease_id == lease_id, Charge.period == period).order_by(Charge.type)
+            select(Charge).where(Charge.lease_id == lease_id, Charge.period == period).order_by(Charge.type, Charge.id)
         )).scalars().all()
+    page_size = 10
+    offset = max(0, min(offset // page_size * page_size, (len(charges) - 1) // page_size * page_size if charges else 0))
+    page = charges[offset:offset + page_size]
     lines = [f"<b>💵 Начисления по договору — {_period_ru(period)}</b> (нажмите № для правки суммы):"]
     if not charges:
         lines.append("— начислений нет")
-    for i, c in enumerate(charges, start=1):
+    else:
+        lines.append(f"Стр. {offset // page_size + 1}/{(len(charges) + page_size - 1) // page_size}")
+    for i, c in enumerate(page, start=offset + 1):
         lines.append(f"{i}. {_CHARGE_TYPE_LABEL.get(c.type, c.type.value)}: {c.amount} ₽ (оплачено {c.paid_amount} ₽)")
-    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"ccorr:{c.id}") for i, c in enumerate(charges, start=1)]
+    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"ccorr:{c.id}") for i, c in enumerate(page, start=offset + 1)]
     rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    nav = []
+    if offset:
+        nav.append(InlineKeyboardButton(text="◀️ Пред. стр.", callback_data=f"lchg:{lease_id}:{_period_code(period)}:{offset - page_size}"))
+    if offset + page_size < len(charges):
+        nav.append(InlineKeyboardButton(text="След. стр. ▶️", callback_data=f"lchg:{lease_id}:{_period_code(period)}:{offset + page_size}"))
+    if nav:
+        rows.append(nav)
     rows.append([
         InlineKeyboardButton(text="◀️ Пред. месяц", callback_data=f"lchg:{lease_id}:{_period_code(_shift_month(period, -1))}"),
         InlineKeyboardButton(text="След. месяц ▶️", callback_data=f"lchg:{lease_id}:{_period_code(_shift_month(period, 1))}"),
@@ -522,9 +548,25 @@ async def adjust_save(message: Message, state: FSMContext) -> None:
 
 
 # --- Показания счётчиков (ручной ввод / электричество) --------------------
-@router.callback_query(F.data == "menu:readings")
-async def readings_menu(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
+_PICKER_PAGE = 10
+
+
+def _picker_page(rows, offset: int):
+    total = len(rows)
+    offset = max(0, min(offset, ((total - 1) // _PICKER_PAGE) * _PICKER_PAGE if total else 0))
+    return rows[offset:offset + _PICKER_PAGE], offset, total
+
+
+def _picker_navigation(offset: int, total: int, prefix: str) -> list[InlineKeyboardButton]:
+    buttons = []
+    if offset:
+        buttons.append(InlineKeyboardButton(text="◀️ Пред.", callback_data=f"{prefix}:{offset - _PICKER_PAGE}"))
+    if offset + _PICKER_PAGE < total:
+        buttons.append(InlineKeyboardButton(text="След. ▶️", callback_data=f"{prefix}:{offset + _PICKER_PAGE}"))
+    return buttons
+
+
+async def _show_readings_picker(callback: CallbackQuery, offset: int) -> None:
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         if lid is None:
@@ -536,23 +578,40 @@ async def readings_menu(callback: CallbackQuery, state: FSMContext) -> None:
                 select(Meter.id, Meter.serial_no, Meter.label, Premises.label)
                 .join(Premises, Premises.id == Meter.premises_id)
                 .where(Premises.landlord_id == lid)
+                .order_by(Meter.id)
             )
         ).all()
     if not rows:
         await edit_or_send(callback.message, "Счётчиков пока нет.", reply_markup=finance_back_kb())
         await callback.answer()
         return
-    kb_rows = [
-        [InlineKeyboardButton(
-            text=f"{prem} · {serial or label or ('счётчик ' + str(mid))}",
-            callback_data=f"mr:{mid}",
-        )]
-        for mid, serial, label, prem in rows
-    ]
+    page, offset, total = _picker_page(rows, offset)
+    numbered = [InlineKeyboardButton(text=str(i), callback_data=f"mr:{mid}")
+                for i, (mid, serial, label, prem) in enumerate(page, offset + 1)]
+    kb_rows = [numbered[i:i + 5] for i in range(0, len(numbered), 5)]
+    nav = _picker_navigation(offset, total, "mrpg")
+    if nav:
+        kb_rows.append(nav)
     kb_rows.append([InlineKeyboardButton(text="◀️ Учёт и финансы", callback_data="menu:finance")])
     banner = _notif_banner(await _tasks_notif_count(callback.from_user.id))
-    await edit_or_send(callback.message, banner + "Выберите счётчик для ввода показаний:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    pages = (total + _PICKER_PAGE - 1) // _PICKER_PAGE
+    lines = [banner + f"Выберите счётчик для ввода показаний:\nСтр. {offset // _PICKER_PAGE + 1}/{pages}. Нажмите №:"]
+    for i, (mid, serial, label, prem) in enumerate(page, offset + 1):
+        name = f"{prem} · {serial or label or ('счётчик ' + str(mid))}".replace("\n", " ")
+        lines.append(f"{i}. {escape(name[:99] + '…' if len(name) > 100 else name)}")
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
     await callback.answer()
+
+
+@router.callback_query(F.data == "menu:readings")
+async def readings_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _show_readings_picker(callback, 0)
+
+
+@router.callback_query(F.data.startswith("mrpg:"))
+async def readings_picker_page(callback: CallbackQuery, state: FSMContext) -> None:
+    await _show_readings_picker(callback, int(callback.data.split(":", 1)[1]))
 
 
 @router.callback_query(F.data.startswith("mr:"))
@@ -1262,28 +1321,46 @@ async def task_done_delete(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 # --- Ручная отметка оплаты от арендатора -----------------------------------
-@router.callback_query(F.data == "menu:pay")
-async def payment_manual_menu(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
+async def _show_payment_picker(callback: CallbackQuery, offset: int) -> None:
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         rows = (await session.execute(
             select(Lease.id, Lease.contract_no, Tenant.name)
             .join(Tenant, Tenant.id == Lease.tenant_id)
             .where(Tenant.landlord_id == lid, Lease.status == LeaseStatus.active)
+            .order_by(Lease.id)
         )).all() if lid else []
     if not rows:
         await edit_or_send(callback.message, "Активных договоров нет.", reply_markup=finance_back_kb())
         await callback.answer()
         return
-    kb_rows = [
-        [InlineKeyboardButton(text=f"{name} · №{contract}", callback_data=f"pm:{lease_id}")]
-        for lease_id, contract, name in rows
-    ]
+    page, offset, total = _picker_page(rows, offset)
+    numbered = [InlineKeyboardButton(text=str(i), callback_data=f"pm:{lease_id}")
+                for i, (lease_id, contract, name) in enumerate(page, offset + 1)]
+    kb_rows = [numbered[i:i + 5] for i in range(0, len(numbered), 5)]
+    nav = _picker_navigation(offset, total, "pmpg")
+    if nav:
+        kb_rows.append(nav)
     kb_rows.append([InlineKeyboardButton(text="◀️ Учёт и финансы", callback_data="menu:finance")])
     banner = _notif_banner(await _tasks_notif_count(callback.from_user.id))
-    await edit_or_send(callback.message, banner + "Выберите договор для отметки оплаты:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    pages = (total + _PICKER_PAGE - 1) // _PICKER_PAGE
+    lines = [banner + f"Выберите договор для отметки оплаты:\nСтр. {offset // _PICKER_PAGE + 1}/{pages}. Нажмите №:"]
+    for i, (lease_id, contract, name) in enumerate(page, offset + 1):
+        label = f"{name} · №{contract}".replace("\n", " ")
+        lines.append(f"{i}. {escape(label[:99] + '…' if len(label) > 100 else label)}")
+    await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
     await callback.answer()
+
+
+@router.callback_query(F.data == "menu:pay")
+async def payment_manual_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _show_payment_picker(callback, 0)
+
+
+@router.callback_query(F.data.startswith("pmpg:"))
+async def payment_picker_page(callback: CallbackQuery, state: FSMContext) -> None:
+    await _show_payment_picker(callback, int(callback.data.split(":", 1)[1]))
 
 
 _CHARGE_TYPE_LABEL = {
@@ -1308,22 +1385,41 @@ async def payment_manual_pick(callback: CallbackQuery, state: FSMContext) -> Non
             await billing_service.create_rent_charge(session, lease, period)
             await billing_service.create_electricity_charge(session, lease, period)
             await session.commit()
+    await _show_charge_picker(callback, lease_id, 0)
+
+
+async def _show_charge_picker(callback: CallbackQuery, lease_id: int, offset: int) -> None:
+    async with async_session_factory() as session:
         charges = (await session.execute(
-            select(Charge).where(Charge.lease_id == lease_id).order_by(Charge.period, Charge.type)
+            select(Charge).where(Charge.lease_id == lease_id, Charge.amount > Charge.paid_amount)
+            .order_by(Charge.period, Charge.type, Charge.id)
         )).scalars().all()
-    rows: list[list[InlineKeyboardButton]] = []
-    for c in charges:
-        outstanding = c.amount - c.paid_amount
-        if outstanding <= 0:
-            continue
-        label = f"{_CHARGE_TYPE_LABEL.get(c.type, c.type.value)} {c.period.strftime('%m.%Y')}: {outstanding} ₽"
-        rows.append([InlineKeyboardButton(text=label, callback_data=f"payc:{c.id}")])
+    page, offset, total = _picker_page(charges, offset)
+    numbered = [InlineKeyboardButton(text=str(i), callback_data=f"payc:{c.id}")
+                for i, c in enumerate(page, offset + 1)]
+    rows = [numbered[i:i + 5] for i in range(0, len(numbered), 5)]
+    nav = _picker_navigation(offset, total, f"pcpg:{lease_id}")
+    if nav:
+        rows.append(nav)
     rows.append([InlineKeyboardButton(text="💰 Произвольная сумма", callback_data=f"paylump:{lease_id}")])
     rows.append([InlineKeyboardButton(text="◀️ К договорам", callback_data="menu:pay")])
-    hint = "Выберите начисление к оплате или «Произвольная сумма»:" if len(rows) > 2 else \
-        "Открытых начислений нет. Можно отметить произвольную сумму:"
+    if total:
+        pages = (total + _PICKER_PAGE - 1) // _PICKER_PAGE
+        lines = [f"Выберите начисление к оплате или «Произвольная сумма»:\nСтр. {offset // _PICKER_PAGE + 1}/{pages}. Нажмите №:"]
+        for i, c in enumerate(page, offset + 1):
+            label = _CHARGE_TYPE_LABEL.get(c.type, c.type.value)
+            lines.append(f"{i}. {label} {c.period:%m.%Y}: {c.amount - c.paid_amount} ₽")
+        hint = "\n".join(lines)
+    else:
+        hint = "Открытых начислений нет. Можно отметить произвольную сумму:"
     await edit_or_send(callback.message, hint, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pcpg:"))
+async def payment_charge_page(callback: CallbackQuery, state: FSMContext) -> None:
+    _, lease_id, offset = callback.data.split(":")
+    await _show_charge_picker(callback, int(lease_id), int(offset))
 
 
 @router.callback_query(F.data.startswith("paylump:"))
