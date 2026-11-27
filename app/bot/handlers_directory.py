@@ -67,6 +67,41 @@ def _list_kb(add_cb: str) -> InlineKeyboardMarkup:
     ])
 
 
+_PICK_PAGE = 10
+
+
+def _short(value, limit: int = 100) -> str:
+    text = str(value).replace("\n", " ").strip()
+    return escape(text[:limit - 1] + "…" if len(text) > limit else text)
+
+
+def _picker(items, offset: int, *, title: str, label, select_cb, page_cb,
+            actions: list[list[InlineKeyboardButton]]) -> tuple[str, InlineKeyboardMarkup, int]:
+    """Короткий список с номерами и стабильной постраничной навигацией."""
+    total = len(items)
+    offset = max(0, min(offset, ((total - 1) // _PICK_PAGE) * _PICK_PAGE if total else 0))
+    page = items[offset:offset + _PICK_PAGE]
+    lines = [title]
+    if page:
+        lines.append(f"Стр. {offset // _PICK_PAGE + 1}/{(total + _PICK_PAGE - 1) // _PICK_PAGE}. Нажмите №:")
+        for n, item in enumerate(page, offset + 1):
+            lines.append(f"{n}. {_short(label(item))}")
+    else:
+        lines.append("— пусто")
+    buttons = [InlineKeyboardButton(text=str(n), callback_data=select_cb(item))
+               for n, item in enumerate(page, offset + 1)]
+    rows = [buttons[i:i + 5] for i in range(0, len(buttons), 5)]
+    nav = []
+    if offset:
+        nav.append(InlineKeyboardButton(text="◀️ Пред.", callback_data=page_cb(offset - _PICK_PAGE)))
+    if offset + _PICK_PAGE < total:
+        nav.append(InlineKeyboardButton(text="След. ▶️", callback_data=page_cb(offset + _PICK_PAGE)))
+    if nav:
+        rows.append(nav)
+    rows.extend(actions)
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows), offset
+
+
 # --- FSM -------------------------------------------------------------------
 class PremisesFSM(StatesGroup):
     label = State()
@@ -145,6 +180,22 @@ def _all_premises_status(p: Premises, has_active_lease: bool) -> str:
     }.get(p.readiness, "⚪ нет данных")
 
 
+async def _premises_picker_details(session, landlord_id: int):
+    sites = (await session.execute(select(PropertySite.id, PropertySite.name).where(
+        PropertySite.landlord_id == landlord_id
+    ))).all()
+    occupants = await directory_service.active_occupants(session, landlord_id)
+    return dict(sites), occupants
+
+
+def _premises_picker_label(p: Premises, sites: dict, occupants: dict, *, status: bool = True) -> str:
+    site = sites.get(p.site_id, "площадка не указана")
+    result = f"{directory_service.premises_title(p)[:45]} · {site[:25]}"
+    if status:
+        result += f" · {_all_premises_status(p, bool(occupants.get(p.id)))}"
+    return result
+
+
 def _prem_submenu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🟢 Свободные", callback_data="premlist:free:0"),
@@ -153,6 +204,14 @@ def _prem_submenu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="➕ Добавить", callback_data="dadd:premises")],
         [InlineKeyboardButton(text="◀️ Справочники", callback_data="menu:directory")],
     ])
+
+
+async def _clear_keep_premises_navigation(state: FSMContext) -> None:
+    """Сбросить ввод, сохранив возврат в открытый список помещений."""
+    navigation = (await state.get_data()).get("premises_navigation")
+    await state.clear()
+    if navigation:
+        await state.update_data(premises_navigation=navigation)
 
 
 @router.callback_query(F.data == "dir:premises")
@@ -180,6 +239,7 @@ async def premises_list(callback: CallbackQuery, state: FSMContext) -> None:
 
     total = len(items)
     offset = max(0, min(offset, (total - 1) // _PREM_PAGE * _PREM_PAGE if total else 0))
+    await state.update_data(premises_navigation={"filter": flt, "offset": offset})
     page = items[offset:offset + _PREM_PAGE]
 
     lines = [f"<b>🏢 Помещения — {_PREM_TITLES.get(flt, '')}</b>"]
@@ -192,9 +252,9 @@ async def premises_list(callback: CallbackQuery, state: FSMContext) -> None:
             area = f", {p.area} м²" if p.area is not None else ""
             who = ""
             if occ.get(p.id):
-                who = " · " + ", ".join(occ[p.id])
-            status = _all_premises_status(p, bool(occ.get(p.id))) if flt == "all" else _status_label(p.is_occupied or bool(occ.get(p.id)))
-            lines.append(f"{idx}. {directory_service.premises_title(p)}{area} · {status}{who}")
+                who = " · " + _short(", ".join(occ[p.id]))
+            status = _all_premises_status(p, bool(occ.get(p.id)))
+            lines.append(f"{idx}. {_short(directory_service.premises_title(p))}{area} · {status}{who}")
 
     num_buttons = [
         InlineKeyboardButton(text=str(offset + idx), callback_data=f"ppick:{p.id}")
@@ -213,7 +273,7 @@ async def premises_list(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-async def _render_premises_card(message, pid: int) -> bool:
+async def _render_premises_card(message, pid: int, state: FSMContext | None = None) -> bool:
     """Карточка помещения: занятость (авто), правка полей, удаление."""
     async with async_session_factory() as session:
         p = await session.get(Premises, pid)
@@ -226,8 +286,8 @@ async def _render_premises_card(message, pid: int) -> bool:
         return False
     area = f", {p.area} м²" if p.area is not None else ""
     text = (
-        f"<b>Помещение</b>\n{p.label}{area}\n"
-        f"Литера: {p.litera or '— не указана'}\n"
+        f"<b>Помещение</b>\n{escape(p.label)}{area}\n"
+        f"Литера: {escape(p.litera or '— не указана')}\n"
         f"Площадка: {escape(site.name) if site else '— не указана'}\n"
         f"Готовность: {directory_service.READINESS_LABELS.get(p.readiness, 'не указана')}\n"
         f"Предполагаемая ставка: {p.asking_rate if p.asking_rate is not None else 'не указана'}"
@@ -242,12 +302,15 @@ async def _render_premises_card(message, pid: int) -> bool:
             text += f"\nФактическая ставка: {(rent / p.area).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)} ₽/м²"
         else:
             text += "\nФактическая ставка: не рассчитана"
+    navigation = (await state.get_data()).get("premises_navigation") if state else None
+    back = (f"premlist:{navigation['filter']}:{navigation['offset']}"
+            if navigation and navigation.get("filter") in _PREM_TITLES else "dir:premises")
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"pedit:{p.id}"),
          InlineKeyboardButton(text="🗑 Удалить", callback_data=f"pdel:{p.id}")],
         [InlineKeyboardButton(text="🗺 Площадка", callback_data=f"psite:{p.id}"),
          InlineKeyboardButton(text="🏷 Готовность", callback_data=f"pread:{p.id}")],
-        [InlineKeyboardButton(text="◀️ К помещениям", callback_data="dir:premises")],
+        [InlineKeyboardButton(text="◀️ К помещениям", callback_data=back)],
     ])
     await wiz_reply(message, text, reply_markup=kb)
     return True
@@ -255,9 +318,9 @@ async def _render_premises_card(message, pid: int) -> bool:
 
 @router.callback_query(F.data.startswith("ppick:"))
 async def premises_card(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
+    await _clear_keep_premises_navigation(state)
     pid = int(callback.data.split(":", 1)[1])
-    if not await _render_premises_card(callback.message, pid):
+    if not await _render_premises_card(callback.message, pid, state):
         await callback.answer("Помещение не найдено", show_alert=True)
         return
     await callback.answer()
@@ -265,7 +328,7 @@ async def premises_card(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("pread:"))
 async def premises_readiness_menu(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
+    await _clear_keep_premises_navigation(state)
     pid = int(callback.data.split(":", 1)[1])
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
@@ -275,8 +338,9 @@ async def premises_readiness_menu(callback: CallbackQuery, state: FSMContext) ->
             return
     labels = directory_service.READINESS_LABELS
     colors = {"ready": "🟢", "notready": "🟠", "closed": "⚫", "tech": "⚙️", "build": "🔴"}
-    rows = [[InlineKeyboardButton(text=f"{colors[code]} {label}", callback_data=f"prset:{pid}:{code}")]
-            for code, label in labels.items()]
+    buttons = [InlineKeyboardButton(text=f"{colors[code]} {label}", callback_data=f"prset:{pid}:{code}")
+               for code, label in labels.items()]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows += [[InlineKeyboardButton(text="⚪ Не указана", callback_data=f"prset:{pid}:none")],
              [InlineKeyboardButton(text="◀️ К помещению", callback_data=f"ppick:{pid}")]]
     await edit_or_send(callback.message, "Выберите готовность / тип помещения:",
@@ -286,7 +350,7 @@ async def premises_readiness_menu(callback: CallbackQuery, state: FSMContext) ->
 
 @router.callback_query(F.data.startswith("prset:"))
 async def premises_set_readiness(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
+    await _clear_keep_premises_navigation(state)
     _, raw_pid, code = callback.data.split(":")
     pid = int(raw_pid)
     if code != "none" and code not in directory_service.READINESS_LABELS:
@@ -300,14 +364,16 @@ async def premises_set_readiness(callback: CallbackQuery, state: FSMContext) -> 
             return
         p.readiness = None if code == "none" else code
         await session.commit()
-    await _render_premises_card(callback.message, pid)
+    await _render_premises_card(callback.message, pid, state)
     await callback.answer("Готовность сохранена")
 
 
 @router.callback_query(F.data.startswith("psite:"))
 async def premises_site_menu(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    pid = int(callback.data.split(":", 1)[1])
+    await _clear_keep_premises_navigation(state)
+    parts = callback.data.split(":")
+    pid = int(parts[1])
+    offset = int(parts[2]) if len(parts) > 2 else 0
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         p = await session.get(Premises, pid)
@@ -317,19 +383,22 @@ async def premises_site_menu(callback: CallbackQuery, state: FSMContext) -> None
         sites = (await session.execute(select(PropertySite).where(
             PropertySite.landlord_id == lid
         ).order_by(PropertySite.name))).scalars().all()
-    rows = [[InlineKeyboardButton(text="📍 Краснодар", callback_data=f"pset:{pid}:kr")]]
-    rows.extend([[InlineKeyboardButton(text=f"📍 {site.name}", callback_data=f"pset:{pid}:{site.id}")]
-                 for site in sites if site.name.casefold() != "краснодар"])
-    rows += [[InlineKeyboardButton(text="➕ Другая площадка", callback_data=f"pfield:site:{pid}")],
-             [InlineKeyboardButton(text="✖️ Убрать привязку", callback_data=f"pset:{pid}:none")],
-             [InlineKeyboardButton(text="◀️ К помещению", callback_data=f"ppick:{pid}")]]
-    await edit_or_send(callback.message, "Выберите площадку помещения:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    choices = [("Краснодар", "kr")] + [(site.name, str(site.id))
+               for site in sites if site.name.casefold() != "краснодар"]
+    text, kb, _ = _picker(choices, offset, title="Выберите площадку помещения:",
+        label=lambda item: item[0], select_cb=lambda item: f"pset:{pid}:{item[1]}",
+        page_cb=lambda page: f"psite:{pid}:{page}", actions=[
+            [InlineKeyboardButton(text="➕ Другая площадка", callback_data=f"pfield:site:{pid}")],
+            [InlineKeyboardButton(text="✖️ Убрать привязку", callback_data=f"pset:{pid}:none")],
+            [InlineKeyboardButton(text="◀️ К помещению", callback_data=f"ppick:{pid}")],
+        ])
+    await edit_or_send(callback.message, text, reply_markup=kb)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("pset:"))
 async def premises_set_site(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
+    await _clear_keep_premises_navigation(state)
     _, raw_pid, raw_site = callback.data.split(":")
     pid = int(raw_pid)
     async with async_session_factory() as session:
@@ -349,16 +418,17 @@ async def premises_set_site(callback: CallbackQuery, state: FSMContext) -> None:
                 return
             p.site_id = site.id
         await session.commit()
-    await _render_premises_card(callback.message, pid)
+    await _render_premises_card(callback.message, pid, state)
     await callback.answer("Площадка сохранена")
 
 
 @router.callback_query(F.data.startswith("pedit:"))
 async def premises_edit_menu(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
+    await _clear_keep_premises_navigation(state)
     pid = int(callback.data.split(":", 1)[1])
-    rows = [[InlineKeyboardButton(text=title, callback_data=f"pfield:{field}:{pid}")]
-            for field, title in directory_service.PREMISES_FIELDS.items()]
+    buttons = [InlineKeyboardButton(text=title, callback_data=f"pfield:{field}:{pid}")
+               for field, title in directory_service.PREMISES_FIELDS.items()]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data=f"ppick:{pid}")])
     await edit_or_send(callback.message, "Что изменить?", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
@@ -381,7 +451,7 @@ async def premises_edit_field(callback: CallbackQuery, state: FSMContext) -> Non
 
 @router.callback_query(F.data.startswith("pdel:"))
 async def premises_delete_confirm(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
+    await _clear_keep_premises_navigation(state)
     pid = int(callback.data.split(":", 1)[1])
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗑 Да, удалить", callback_data=f"pdelok:{pid}")],
@@ -517,18 +587,31 @@ async def _premises_finish(message: Message, tg_id: int, state: FSMContext, *, a
 
 # --- Арендаторы ------------------------------------------------------------
 @router.callback_query(F.data == "dir:tenants")
+@router.callback_query(F.data.startswith("dir:tenants:"))
 async def tenants_list(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         items = await directory_service.list_tenants(session, lid) if lid else []
+    offset = int(callback.data.rsplit(":", 1)[1]) if callback.data.startswith("dir:tenants:") else 0
+    offset = max(0, min(offset // _PREM_PAGE * _PREM_PAGE, (len(items) - 1) // _PREM_PAGE * _PREM_PAGE if items else 0))
+    page = items[offset:offset + _PREM_PAGE]
     lines = ["<b>👤 Арендаторы</b> (нажмите № для карточки):"]
     if not items:
         lines.append("— пусто")
-    for i, t in enumerate(items, start=1):
-        lines.append(f"{i}. {t.name} · ИНН {t.inn}")
-    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"tnpick:{t.id}") for i, t in enumerate(items, start=1)]
+    else:
+        lines.append(f"Стр. {offset // _PREM_PAGE + 1}/{(len(items) + _PREM_PAGE - 1) // _PREM_PAGE}")
+    for i, t in enumerate(page, start=offset + 1):
+        lines.append(f"{i}. {_short(t.name)} · ИНН {_short(t.inn, 20)}")
+    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"tnpick:{t.id}") for i, t in enumerate(page, start=offset + 1)]
     rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    nav = []
+    if offset:
+        nav.append(InlineKeyboardButton(text="◀️ Пред.", callback_data=f"dir:tenants:{offset - _PREM_PAGE}"))
+    if offset + _PREM_PAGE < len(items):
+        nav.append(InlineKeyboardButton(text="След. ▶️", callback_data=f"dir:tenants:{offset + _PREM_PAGE}"))
+    if nav:
+        rows.append(nav)
     rows.append([InlineKeyboardButton(text="➕ Добавить", callback_data="dadd:tenants")])
     rows.append([InlineKeyboardButton(text="◀️ Справочники", callback_data="menu:directory")])
     await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -538,19 +621,22 @@ async def tenants_list(callback: CallbackQuery, state: FSMContext) -> None:
 async def _render_tenant_card(message, tid: int) -> bool:
     async with async_session_factory() as session:
         t = await session.get(Tenant, tid)
+        peers = await directory_service.list_tenants(session, t.landlord_id) if t else []
     if t is None:
         return False
+    offset = next((i // _PREM_PAGE * _PREM_PAGE for i, item in enumerate(peers) if item.id == tid), 0)
     lines = [
-        f"<b>Арендатор</b>\n{t.name}",
+        f"<b>Арендатор</b>\n{escape(t.name)}",
         f"Тип: {_ORG_TYPE_LABEL.get(t.type, t.type.value)}",
-        f"ИНН: {t.inn}" + (f" · КПП: {t.kpp}" if t.kpp else ""),
-        f"Адрес: {t.address or '—'}",
-        f"Email: {t.email or '—'} · Тел: {t.phone or '—'}",
+        f"ИНН: {escape(t.inn)}" + (f" · КПП: {escape(t.kpp)}" if t.kpp else ""),
+        f"Адрес: {escape(t.address or '—')}",
+        f"Email: {escape(t.email or '—')} · Тел: {escape(t.phone or '—')}",
     ]
-    rows = [[InlineKeyboardButton(text=title, callback_data=f"tnfield:{field}:{tid}")]
-            for field, title in directory_service.TENANT_FIELDS.items()]
+    buttons = [InlineKeyboardButton(text=title, callback_data=f"tnfield:{field}:{tid}")
+               for field, title in directory_service.TENANT_FIELDS.items()]
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([InlineKeyboardButton(text="🗑 Удалить арендатора", callback_data=f"tndel:{tid}")])
-    rows.append([InlineKeyboardButton(text="◀️ К арендаторам", callback_data="dir:tenants")])
+    rows.append([InlineKeyboardButton(text="◀️ К арендаторам", callback_data=f"dir:tenants:{offset}")])
     await wiz_reply(message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     return True
 
@@ -745,6 +831,7 @@ async def _tenant_finish(message: Message, tg_id: int, state: FSMContext, *, pho
 
 # --- Договоры --------------------------------------------------------------
 @router.callback_query(F.data == "dir:leases")
+@router.callback_query(F.data.startswith("dir:leases:"))
 async def leases_list(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     async with async_session_factory() as session:
@@ -752,13 +839,25 @@ async def leases_list(callback: CallbackQuery, state: FSMContext) -> None:
         items = await directory_service.list_leases(session, lid) if lid else []
         tmap = {t.id: t.name for t in (await directory_service.list_tenants(session, lid) if lid else [])}
         pmap = {p.id: directory_service.premises_title(p) for p in (await directory_service.list_premises(session, lid) if lid else [])}
+    offset = int(callback.data.rsplit(":", 1)[1]) if callback.data.startswith("dir:leases:") else 0
+    offset = max(0, min(offset // _PREM_PAGE * _PREM_PAGE, (len(items) - 1) // _PREM_PAGE * _PREM_PAGE if items else 0))
+    page = items[offset:offset + _PREM_PAGE]
     lines = ["<b>📄 Договоры</b> (нажмите № для карточки):"]
     if not items:
         lines.append("— пусто")
-    for i, l in enumerate(items, start=1):
-        lines.append(f"{i}. №{l.contract_no} · {tmap.get(l.tenant_id, '?')} · {pmap.get(l.premises_id, '?')} · {l.rent_amount} ₽")
-    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"lpick:{l.id}") for i, l in enumerate(items, start=1)]
+    else:
+        lines.append(f"Стр. {offset // _PREM_PAGE + 1}/{(len(items) + _PREM_PAGE - 1) // _PREM_PAGE}")
+    for i, l in enumerate(page, start=offset + 1):
+        lines.append(f"{i}. №{_short(l.contract_no, 40)} · {_short(tmap.get(l.tenant_id, '?'), 80)} · {_short(pmap.get(l.premises_id, '?'), 80)} · {l.rent_amount} ₽")
+    num_buttons = [InlineKeyboardButton(text=str(i), callback_data=f"lpick:{l.id}") for i, l in enumerate(page, start=offset + 1)]
     rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    nav = []
+    if offset:
+        nav.append(InlineKeyboardButton(text="◀️ Пред.", callback_data=f"dir:leases:{offset - _PREM_PAGE}"))
+    if offset + _PREM_PAGE < len(items):
+        nav.append(InlineKeyboardButton(text="След. ▶️", callback_data=f"dir:leases:{offset + _PREM_PAGE}"))
+    if nav:
+        rows.append(nav)
     rows.append([InlineKeyboardButton(text="➕ Добавить", callback_data="dadd:leases")])
     rows.append([InlineKeyboardButton(text="◀️ Справочники", callback_data="menu:directory")])
     await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -772,11 +871,13 @@ async def _render_lease_card(message, lease_id: int) -> bool:
             return False
         tenant = await session.get(Tenant, l.tenant_id)
         premises = await session.get(Premises, l.premises_id)
+        peers = await directory_service.list_leases(session, tenant.landlord_id) if tenant else []
+    offset = next((i // _PREM_PAGE * _PREM_PAGE for i, item in enumerate(peers) if item.id == lease_id), 0)
     text = (
-        f"<b>Договор №{l.contract_no}</b>\n"
-        f"Арендатор: {tenant.name if tenant else '?'}\n"
-        f"Помещение: {premises.label if premises else '?'}\n"
-        f"Литера: {(premises.litera if premises else None) or '— не указана'}\n"
+        f"<b>Договор №{_short(l.contract_no)}</b>\n"
+        f"Арендатор: {_short(tenant.name if tenant else '?')}\n"
+        f"Помещение: {_short(premises.label if premises else '?')}\n"
+        f"Литера: {_short((premises.litera if premises else None) or '— не указана')}\n"
         f"Аренда: {l.rent_amount} ₽ · день оплаты: {l.payment_day}\n"
         f"Статус: {l.status.value}"
     )
@@ -786,7 +887,7 @@ async def _render_lease_card(message, lease_id: int) -> bool:
         [InlineKeyboardButton(text="💵 Начисления (правка)", callback_data=f"lchg:{lease_id}")],
         [InlineKeyboardButton(text="🏠 Сменить помещение", callback_data=f"lprem:{lease_id}")],
         [InlineKeyboardButton(text="🗑 Удалить договор", callback_data=f"ldel:{lease_id}")],
-        [InlineKeyboardButton(text="◀️ К договорам", callback_data="dir:leases")],
+        [InlineKeyboardButton(text="◀️ К договорам", callback_data=f"dir:leases:{offset}")],
     ])
     await wiz_reply(message, text, reply_markup=kb)
     return True
@@ -820,14 +921,23 @@ async def lease_edit_day(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("lprem:"))
 async def lease_reassign_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    lease_id = int(callback.data.split(":", 1)[1])
+    parts = callback.data.split(":")
+    lease_id = int(parts[1])
+    offset = int(parts[2]) if len(parts) > 2 else 0
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
+        lease = await session.get(Lease, lease_id)
+        tenant = await session.get(Tenant, lease.tenant_id) if lease else None
+        if not tenant or tenant.landlord_id != lid:
+            await callback.answer("Договор не найден", show_alert=True)
+            return
         premises = await directory_service.list_premises(session, lid) if lid else []
-    rows = [[InlineKeyboardButton(text=f"{directory_service.premises_title(p)} · {_status_label(p.is_occupied)}", callback_data=f"lpremok:{lease_id}:{p.id}")]
-            for p in premises]
-    rows.append([InlineKeyboardButton(text="◀️ Отмена", callback_data=f"lpick:{lease_id}")])
-    await edit_or_send(callback.message, "Выберите новое помещение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        sites, occupants = await _premises_picker_details(session, lid) if lid else ({}, {})
+    text, kb, _ = _picker(premises, offset, title="Выберите новое помещение:",
+        label=lambda p: _premises_picker_label(p, sites, occupants),
+        select_cb=lambda p: f"lpremok:{lease_id}:{p.id}", page_cb=lambda page: f"lprem:{lease_id}:{page}",
+        actions=[[InlineKeyboardButton(text="◀️ Отмена", callback_data=f"lpick:{lease_id}")]])
+    await edit_or_send(callback.message, text, reply_markup=kb)
     await callback.answer()
 
 
@@ -835,6 +945,13 @@ async def lease_reassign_menu(callback: CallbackQuery, state: FSMContext) -> Non
 async def lease_reassign_apply(callback: CallbackQuery, state: FSMContext) -> None:
     _, lease_id, premises_id = callback.data.split(":")
     async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        lease = await session.get(Lease, int(lease_id))
+        tenant = await session.get(Tenant, lease.tenant_id) if lease else None
+        premises = await session.get(Premises, int(premises_id))
+        if not tenant or tenant.landlord_id != lid or not premises or premises.landlord_id != lid:
+            await callback.answer("Договор или помещение не найдено", show_alert=True)
+            return
         await directory_service.update_lease(session, int(lease_id), premises_id=int(premises_id))
         await session.commit()
     await callback.answer("Помещение изменено")
@@ -877,8 +994,8 @@ async def edit_value_save(message: Message, state: FSMContext) -> None:
             if kind == "premises":
                 await directory_service.update_premises_field(session, eid, data["edit_field"], value)
                 await session.commit()
-                await state.clear()
-                await _render_premises_card(message, eid)
+                await _clear_keep_premises_navigation(state)
+                await _render_premises_card(message, eid, state)
                 return
             if kind == "tenant":
                 await directory_service.update_tenant_field(session, eid, data["edit_field"], value)
@@ -916,6 +1033,10 @@ async def edit_value_save(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "dadd:leases")
 async def lease_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    await _lease_tenant_page(callback, state, 0)
+
+
+async def _lease_tenant_page(callback: CallbackQuery, state: FSMContext, offset: int) -> None:
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         tenants = await directory_service.list_tenants(session, lid) if lid else []
@@ -926,18 +1047,38 @@ async def lease_add(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
     await state.set_state(LeaseFSM.tenant)
-    rows = [[InlineKeyboardButton(text=f"{t.name} (ИНН {t.inn})", callback_data=f"dlt:{t.id}")] for t in tenants]
-    rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")])
-    await edit_or_send(callback.message, "Выберите арендатора:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    text, kb, actual = _picker(tenants, offset, title="Выберите арендатора:",
+        label=lambda t: f"{t.name} (ИНН {t.inn})", select_cb=lambda t: f"dlt:{t.id}",
+        page_cb=lambda page: f"dltpage:{page}",
+        actions=[[InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")]])
+    await state.update_data(lease_tenant_page=actual)
+    await edit_or_send(callback.message, text, reply_markup=kb)
     await callback.answer()
+
+
+@router.callback_query(LeaseFSM.tenant, F.data.startswith("dltpage:"))
+async def lease_tenant_page(callback: CallbackQuery, state: FSMContext) -> None:
+    await _lease_tenant_page(callback, state, int(callback.data.split(":", 1)[1]))
 
 
 @router.callback_query(LeaseFSM.tenant, F.data.startswith("dlt:"))
 async def lease_pick_tenant(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(tenant_id=int(callback.data.split(":", 1)[1]))
+    tenant_id = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        tenant = await session.get(Tenant, tenant_id)
+        if not tenant or tenant.landlord_id != lid:
+            await callback.answer("Арендатор не найден", show_alert=True)
+            return
+    await state.update_data(tenant_id=tenant_id)
+    await _lease_premises_page(callback, state, 0)
+
+
+async def _lease_premises_page(callback: CallbackQuery, state: FSMContext, offset: int) -> None:
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         premises = await directory_service.list_premises(session, lid) if lid else []
+        sites, occupants = await _premises_picker_details(session, lid) if lid else ({}, {})
     if not premises:
         await state.clear()
         await edit_or_send(callback.message, 
@@ -946,10 +1087,25 @@ async def lease_pick_tenant(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
     await state.set_state(LeaseFSM.premises)
-    rows = [[InlineKeyboardButton(text=directory_service.premises_title(p), callback_data=f"dlp:{p.id}")] for p in premises]
-    rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")])
-    await edit_or_send(callback.message, "Выберите помещение:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    text, kb, _ = _picker(premises, offset, title="Выберите помещение:",
+        label=lambda p: _premises_picker_label(p, sites, occupants), select_cb=lambda p: f"dlp:{p.id}",
+        page_cb=lambda page: f"dlppage:{page}", actions=[
+            [InlineKeyboardButton(text="◀️ К арендаторам", callback_data="dlback:tenant")],
+            [InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")],
+        ])
+    await edit_or_send(callback.message, text, reply_markup=kb)
     await callback.answer()
+
+
+@router.callback_query(LeaseFSM.premises, F.data.startswith("dlppage:"))
+async def lease_premises_page(callback: CallbackQuery, state: FSMContext) -> None:
+    await _lease_premises_page(callback, state, int(callback.data.split(":", 1)[1]))
+
+
+@router.callback_query(LeaseFSM.premises, F.data == "dlback:tenant")
+async def lease_back_to_tenants(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    await _lease_tenant_page(callback, state, data.get("lease_tenant_page", 0))
 
 
 @router.callback_query(LeaseFSM.premises, F.data.startswith("dlp:"))
@@ -957,8 +1113,9 @@ async def lease_pick_premises(callback: CallbackQuery, state: FSMContext) -> Non
     """После выбора помещения обязательно спрашиваем литеру (свободный текст)."""
     pid = int(callback.data.split(":", 1)[1])
     async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
         p = await session.get(Premises, pid)
-    if p is None:
+    if p is None or p.landlord_id != lid:
         await callback.answer("Помещение не найдено", show_alert=True)
         return
     await state.update_data(premises_id=pid, premises_litera=p.litera)
@@ -967,11 +1124,11 @@ async def lease_pick_premises(callback: CallbackQuery, state: FSMContext) -> Non
     if p.litera:
         rows.append([InlineKeyboardButton(text=f"✅ Оставить литеру {p.litera}", callback_data="dll:keep")])
     rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")])
-    current = f"Сейчас у помещения литера <b>{p.litera}</b> — оставьте её или введите другую." if p.litera \
+    current = f"Сейчас у помещения литера <b>{_short(p.litera)}</b> — оставьте её или введите другую." if p.litera \
         else "У помещения литера ещё не указана — введите её."
     await edit_or_send(
         callback.message,
-        f"Помещение «{p.label}».\n{_LITERA_PROMPT}\n\n{current}",
+        f"Помещение «{_short(p.label, 300)}».\n{_LITERA_PROMPT}\n\n{current}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()
@@ -1097,21 +1254,34 @@ async def _lease_finish(message: Message, tg_id: int, state: FSMContext, *, paym
 
 # --- Счётчики --------------------------------------------------------------
 @router.callback_query(F.data == "dir:meters")
+@router.callback_query(F.data.startswith("dir:meters:"))
 async def meters_list(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         items = await directory_service.list_meters(session, lid) if lid else []
+    offset = int(callback.data.rsplit(":", 1)[1]) if callback.data.startswith("dir:meters:") else 0
+    offset = max(0, min(offset // _PREM_PAGE * _PREM_PAGE, (len(items) - 1) // _PREM_PAGE * _PREM_PAGE if items else 0))
+    page = items[offset:offset + _PREM_PAGE]
     lines = ["<b>🔌 Счётчики</b> (нажмите № для карточки):"]
     if not items:
         lines.append("— пусто")
+    else:
+        lines.append(f"Стр. {offset // _PREM_PAGE + 1}/{(len(items) + _PREM_PAGE - 1) // _PREM_PAGE}")
     num_buttons = []
-    for i, (m, prem) in enumerate(items, start=1):
+    for i, (m, prem) in enumerate(page, start=offset + 1):
         title = m.serial_no or m.label or "счётчик"
         coeff = f" · k={m.coefficient}" if m.coefficient is not None else ""
-        lines.append(f"{i}. {prem} · {title}{coeff}")
+        lines.append(f"{i}. {_short(prem)} · {_short(title)}{coeff}")
         num_buttons.append(InlineKeyboardButton(text=str(i), callback_data=f"mpick:{m.id}"))
     rows = [num_buttons[i:i + 5] for i in range(0, len(num_buttons), 5)]
+    nav = []
+    if offset:
+        nav.append(InlineKeyboardButton(text="◀️ Пред.", callback_data=f"dir:meters:{offset - _PREM_PAGE}"))
+    if offset + _PREM_PAGE < len(items):
+        nav.append(InlineKeyboardButton(text="След. ▶️", callback_data=f"dir:meters:{offset + _PREM_PAGE}"))
+    if nav:
+        rows.append(nav)
     rows.append([InlineKeyboardButton(text="➕ Добавить", callback_data="dadd:meters")])
     rows.append([InlineKeyboardButton(text="◀️ Справочники", callback_data="menu:directory")])
     await edit_or_send(callback.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -1126,15 +1296,17 @@ async def meter_card(callback: CallbackQuery, state: FSMContext) -> None:
         from app.db.models import Meter
         m = await session.get(Meter, mid)
         prem = await session.get(Premises, m.premises_id) if m else None
+        peers = await directory_service.list_meters(session, prem.landlord_id) if prem else []
     if m is None:
         await callback.answer("Счётчик не найден", show_alert=True)
         return
+    offset = next((i // _PREM_PAGE * _PREM_PAGE for i, (item, _) in enumerate(peers) if item.id == mid), 0)
     title = m.serial_no or m.label or "счётчик"
     coeff = m.coefficient if m.coefficient is not None else "по умолчанию"
-    text = f"<b>Счётчик</b>\n{title}\nПомещение: {prem.label if prem else '?'}\nКоэффициент: {coeff}"
+    text = f"<b>Счётчик</b>\n{_short(title)}\nПомещение: {_short(prem.label if prem else '?')}\nКоэффициент: {coeff}"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗑 Удалить счётчик", callback_data=f"mdel:{mid}")],
-        [InlineKeyboardButton(text="◀️ К счётчикам", callback_data="dir:meters")],
+        [InlineKeyboardButton(text="◀️ К счётчикам", callback_data=f"dir:meters:{offset}")],
     ])
     await edit_or_send(callback.message, text, reply_markup=kb)
     await callback.answer()
@@ -1166,9 +1338,14 @@ async def meter_delete(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "dadd:meters")
 async def meter_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
+    await _meter_premises_page(callback, state, 0)
+
+
+async def _meter_premises_page(callback: CallbackQuery, state: FSMContext, offset: int) -> None:
     async with async_session_factory() as session:
         lid = await _landlord_id(session, callback.from_user.id)
         premises = await directory_service.list_premises(session, lid) if lid else []
+        sites, occupants = await _premises_picker_details(session, lid) if lid else ({}, {})
     if not premises:
         await edit_or_send(callback.message, 
             "Сначала добавьте помещение (раздел «Помещения»).", reply_markup=_dir_menu_kb()
@@ -1176,15 +1353,29 @@ async def meter_add(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer()
         return
     await state.set_state(MeterFSM.premises)
-    rows = [[InlineKeyboardButton(text=p.label, callback_data=f"dmp:{p.id}")] for p in premises]
-    rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")])
-    await edit_or_send(callback.message, "Помещение счётчика:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    text, kb, _ = _picker(premises, offset, title="Помещение счётчика:",
+        label=lambda p: _premises_picker_label(p, sites, occupants, status=False), select_cb=lambda p: f"dmp:{p.id}",
+        page_cb=lambda page: f"dmppage:{page}",
+        actions=[[InlineKeyboardButton(text="✖️ Отмена", callback_data="nav:home")]])
+    await edit_or_send(callback.message, text, reply_markup=kb)
     await callback.answer()
+
+
+@router.callback_query(MeterFSM.premises, F.data.startswith("dmppage:"))
+async def meter_premises_page(callback: CallbackQuery, state: FSMContext) -> None:
+    await _meter_premises_page(callback, state, int(callback.data.split(":", 1)[1]))
 
 
 @router.callback_query(MeterFSM.premises, F.data.startswith("dmp:"))
 async def meter_pick_premises(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(premises_id=int(callback.data.split(":", 1)[1]))
+    pid = int(callback.data.split(":", 1)[1])
+    async with async_session_factory() as session:
+        lid = await _landlord_id(session, callback.from_user.id)
+        p = await session.get(Premises, pid)
+        if not p or p.landlord_id != lid:
+            await callback.answer("Помещение не найдено", show_alert=True)
+            return
+    await state.update_data(premises_id=pid)
     await state.set_state(MeterFSM.serial)
     await edit_or_send(callback.message, "Серийный номер счётчика или пропустите:", reply_markup=_io_kb("dsk:meter_serial"))
     await callback.answer()
